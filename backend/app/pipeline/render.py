@@ -216,6 +216,20 @@ def content_height(src_w: int, src_h: int, out_w: int, out_h: int) -> int:
     return int(round(min(natural * zoom, out_h)))
 
 
+def _narrower(src_w: int, src_h: int, width: int, height: int) -> bool:
+    """Whether the source is narrower than the frame (a tall phone recording in
+    9:16, a vertical or square video in 16:9).
+
+    The zoom policy below assumes the opposite: it scales the picture to its
+    target height and crops the overflowing SIDES back to the frame width. A
+    narrower source has no overflowing sides -- scaled to the frame height it is
+    narrower than the frame, and the crop asked ffmpeg for more pixels than
+    exist ("Invalid too big ... size"), failing the whole render. Such a
+    source fits by height instead, with the backdrop at the sides.
+    """
+    return bool(src_w and src_h) and src_w * height < width * src_h
+
+
 def blur_filter(width: int, height: int, src_w: int = None, src_h: int = None) -> str:
     """Subject centred on a blurred fill of itself, for any canvas size.
 
@@ -226,7 +240,9 @@ def blur_filter(width: int, height: int, src_w: int = None, src_h: int = None) -
     bg = (f"[0:v]scale={half_w}:{half_h}:force_original_aspect_ratio=increase,"
           f"crop={half_w}:{half_h},gblur=sigma=12,scale={width}:{height}[bg];")
 
-    if src_w and src_h:
+    if _narrower(src_w, src_h, width, height):
+        fg = f"[0:v]scale=-2:{height}[fg];"
+    elif src_w and src_h:
         fg_h = content_height(src_w, src_h, width, height)
         # scale to that height, then crop the overflowing sides back to width
         fg = (f"[0:v]scale=-2:{fg_h}:force_original_aspect_ratio=increase,"
@@ -260,6 +276,10 @@ def fit_filter(width: int, height: int, background: str = "black",
     colour = (background or "black").replace("#", "0x")
     # y of the block's top edge = centre - half its height, clamped into frame.
     y = f"max(0\\,min(oh-ih\\,{FIT_CONTENT_BIAS}*oh-ih/2))"
+    if _narrower(src_w, src_h, width, height):
+        # Full height, centred, with the bars at the sides.
+        return (f"[0:v]scale=-2:{height},"
+                f"pad={width}:{height}:(ow-iw)/2:0:{colour}[framed]")
     if src_w and src_h:
         fg_h = content_height(src_w, src_h, width, height)
         scale = (f"[0:v]scale=-2:{fg_h}:force_original_aspect_ratio=increase,"

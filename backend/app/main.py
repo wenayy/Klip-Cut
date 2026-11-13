@@ -42,9 +42,9 @@ from app.jobs import (create_job, expire_due_jobs, get_job, get_job_transcript,
                       list_jobs, update_job)
 from app.models import Clip, FreeEditorExport, Job, Share, User, _iso_utc
 from app.pipeline import (analyzer, caption_emoji, caption_presets, censor,
-                          content, emoji_overlay, energy, downloader, hinglish,
-                          music, pacing, reframe, render, scoring, subtitles,
-                          transcriber, voiceover)
+                          content, emoji_overlay, energy, downloader, highlight,
+                          hinglish, music, pacing, reframe, render, scoring,
+                          subtitles, transcriber, voiceover)
 from app.dodo_catalog import subscription_product
 
 app = FastAPI(title="Clipper API")
@@ -125,6 +125,10 @@ def _render_slot(job_id: str = None, wait: float = None):
 # "auto" is resolved per job by content.guess_genre; the rest name a rubric in
 # analyzer.GENRES directly.
 GENRE_CHOICES = ("auto", "general", "podcast", "gaming")
+OUTPUT_CHOICES = ("clips", "highlight")
+HIGHLIGHT_TOO_SHORT = ("This video is too short for a highlight video -- it needs "
+                       "at least 8 minutes to condense. Make clips from it instead; "
+                       "you were not charged.")
 
 # Below this share of the runtime being speech, a gameplay video's moments are
 # in the game rather than in what is said over it, so they are found by sound
@@ -369,6 +373,16 @@ class JobRequest(BaseModel):
     # Opt-in: a bed changes the mood of every clip, so it should be a choice.
     music_bed: bool = False
     auto_broll: bool = True
+    # What the job makes. "clips": n_clips short standalone posts. "highlight":
+    # ONE longer video of the best parts of the whole source, in story order --
+    # a different product with its own length, so n_clips, length_pref and the
+    # clip-only extras (title card, music bed, keyword zoom) do not apply.
+    output: str = "clips"
+    # Target length of a highlight video in minutes; None = auto (~15% of the
+    # source, 3 to 15 minutes).
+    highlight_minutes: Optional[float] = None
+    highlight_memes: bool = True     # reaction beats after the biggest moments
+    highlight_tags: bool = True      # "12 MIN LATER" where the video skips ahead
     # Transcribe speech that switches language mid-sentence with the model that
     # can follow it. Off by default and gated on the plan -- see billing.allows.
     multilingual: bool = False
@@ -608,6 +622,15 @@ def plans():
         "extras": {
             "high_quality_per_clip": billing.HIGH_QUALITY_PER_CLIP,
             "advanced_model_per_job": billing.ADVANCED_MODEL_PER_JOB,
+            "highlight_per_minute": billing.HIGHLIGHT_CREDITS_PER_MINUTE,
+            "high_quality_per_highlight_minute": billing.HIGH_QUALITY_PER_HIGHLIGHT_MINUTE,
+        },
+        "highlight": {
+            "min_source_minutes": highlight.MIN_SOURCE_SECONDS // 60,
+            "max_minutes": highlight.MAX_TARGET // 60,
+            "choices": list(highlight.LENGTH_CHOICES),
+            "auto_share": highlight.TARGET_SHARE,
+            "min_auto_minutes": highlight.MIN_TARGET // 60,
         },
     }
 
@@ -639,7 +662,17 @@ def estimate(body: dict):
     n_clips = int(body.get("n_clips") or 1)
     high_quality = bool(body.get("high_quality"))
     advanced_model = bool(body.get("advanced_model"))
-    breakdown = billing.cost_breakdown(n_clips, high_quality, advanced_model)
+    if body.get("output") == "highlight":
+        # Priced by length: the requested minutes, or auto from the source.
+        minutes = body.get("highlight_minutes")
+        if not minutes:
+            source = float(body.get("duration_seconds") or 0)
+            minutes = (highlight.target_seconds(source) / 60 if source
+                       else highlight.MIN_TARGET / 60)
+        breakdown = billing.highlight_breakdown(float(minutes) * 60, high_quality,
+                                                advanced_model)
+    else:
+        breakdown = billing.cost_breakdown(n_clips, high_quality, advanced_model)
     return {
         # `credits` stays the total, so a client that only reads this field
         # still quotes the right number when extras are on.
@@ -1641,9 +1674,23 @@ def _prepare_job(req: JobRequest, user: User = None, uploaded: bool = False) -> 
         raise HTTPException(status_code=400,
                             detail=f"Unknown genre. Choose from: {', '.join(GENRE_CHOICES)}")
 
+    if req.output not in OUTPUT_CHOICES:
+        raise HTTPException(status_code=400,
+                            detail=f"Unknown output. Choose from: {', '.join(OUTPUT_CHOICES)}")
+    highlight_video = req.output == "highlight"
+    if highlight_video:
+        if req.mode != "original":
+            raise HTTPException(status_code=400,
+                                detail="A highlight video keeps the original audio.")
+        if req.highlight_minutes is not None and not (
+                1 <= req.highlight_minutes <= highlight.MAX_TARGET / 60):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Highlight length must be 1 to {highlight.MAX_TARGET // 60} minutes.")
+
     limits = billing.limits_for(user.plan if user else None,
                                user.email if user else None)
-    if req.n_clips > limits["max_clips"]:
+    if not highlight_video and req.n_clips > limits["max_clips"]:
         raise HTTPException(
             status_code=402,
             detail=(f"Your plan covers up to {limits['max_clips']} clips per video. "
@@ -1666,7 +1713,20 @@ def _prepare_job(req: JobRequest, user: User = None, uploaded: bool = False) -> 
     # Per-clip pricing means the price of what was ASKED for is known up front,
     # so the gate can be exact instead of "has any credit at all". Charged for
     # real once the analysis settles the actual clip count, which may be lower.
-    if user:
+    if user and highlight_video:
+        # The real length is only known once the moments are chosen, so the
+        # gate asks for what was requested, or the shortest auto length.
+        seconds = (req.highlight_minutes or highlight.MIN_TARGET / 60) * 60
+        want = billing.credits_for_highlight(seconds, req.high_quality,
+                                             req.advanced_model)
+        have = billing.balance(user.id)
+        if have < want:
+            raise HTTPException(
+                status_code=402,
+                detail=(f"A highlight video of about {seconds / 60:.0f} minutes costs "
+                        f"at least {want} credits and you have {have}. Top up, "
+                        f"pick a shorter length, or make clips instead."))
+    elif user:
         want = billing.credits_for_job(req.n_clips, req.high_quality,
                                        req.advanced_model)
         have = billing.balance(user.id)
@@ -2122,6 +2182,17 @@ def run_pipeline(job_id: str, req: JobRequest, gameplay_loops: list = None,
         _run_pipeline_locked(job_id, req, gameplay_loops, job_user_id, uploaded_source)
 
 
+def _clip_timeline_words(item: dict) -> list:
+    """A prepared clip's words on the rendered clip's own timeline.
+
+    Pause tightening already re-times words onto the clip; otherwise they are
+    in source time and start at the clip's start.
+    """
+    shift = 0.0 if item["render_kwargs"]["segments"] else item["clip"]["start"]
+    return [{**w, "start": w["start"] - shift, "end": w["end"] - shift}
+            for w in (item["clip_words"] or [])]
+
+
 def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = None,
                          job_user_id: str = None, uploaded_source: bool = False):
     gameplay_loops = gameplay_loops or []
@@ -2301,7 +2372,46 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
         action_first = (genre == "gaming" and not silent_footage
                         and coverage < ACTION_FIRST_COVERAGE)
 
-        if silent_footage or action_first:
+        highlight_video = req.output == "highlight"
+        if highlight_video:
+            # One video of the best parts, not N clips: candidates from across
+            # the whole source, then a time budget decides what survives.
+            if source_seconds < highlight.MIN_SOURCE_SECONDS:
+                raise RuntimeError(HIGHLIGHT_TOO_SHORT)
+            target = highlight.target_seconds(source_seconds, req.highlight_minutes)
+            update_job(job_id, progress_message="Finding the best parts of the whole video...",
+                       percent=0)
+            want_moments = max(8, int(target / 30) * 2)
+            if silent_footage or action_first:
+                pool = content.highlight_moments(
+                    video_path, source_seconds, want_moments,
+                    audio_path=highlight_audio, length_pref="medium", words=all_words)
+            else:
+                utterances = energy.analyze(audio_path, utterances)
+                pool = analyzer.highlight_candidates(
+                    utterances, intent=req.intent, genre=genre,
+                    # This pass IS the whole selection for a highlight video, so
+                    # the paid advanced model runs it; otherwise the cheap one.
+                    model=(analyzer.model_for(True)
+                           if job_options.get("advanced_model") else None),
+                    on_progress=lambda n, total: update_job(
+                        job_id, percent=round(n / total * 100),
+                        progress_message=f"Reading part {n} of {total} of the video..."))
+                if genre == "gaming":
+                    # The best plays are often met with silence; the game's own
+                    # sound and motion find those.
+                    pool += content.highlight_moments(
+                        video_path, source_seconds, want_moments // 2,
+                        audio_path=highlight_audio, length_pref="medium",
+                        words=all_words, avoid=[(c["start"], c["end"]) for c in pool])
+            resolved_clips = highlight.select_segments(pool, target, source_seconds)
+            if not resolved_clips:
+                raise RuntimeError(
+                    "Nothing in this video scored well enough for a highlight video.")
+            print(f"[clipper] highlight: {len(resolved_clips)} part(s), "
+                  f"{sum(c['end'] - c['start'] for c in resolved_clips) / 60:.1f} of "
+                  f"{target / 60:.1f} target minutes")
+        elif silent_footage or action_first:
             # Nothing to read, or too little of it to matter, so the moments
             # come from the footage: motion peaks, sudden game audio, music
             # hits. Same idea as the spoken path, just a different sensor. Any
@@ -2374,31 +2484,37 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
             # from `req`, for the same reason the watermark and plan limits do:
             # what someone agreed to at the review screen is what they get
             # billed for, whatever has changed since.
-            cost = billing.credits_for_job(
-                len(resolved_clips),
-                bool(job_options.get("high_quality")),
-                bool(job_options.get("advanced_model")),
-            )
+            hq = bool(job_options.get("high_quality"))
+            adv = bool(job_options.get("advanced_model"))
+            if highlight_video:
+                # One video, priced by its finished length.
+                seconds = sum(c["end"] - c["start"] for c in resolved_clips)
+                cost = billing.credits_for_highlight(seconds, hq, adv)
+                what = f"This {seconds / 60:.0f}-minute highlight video needs"
+                note = f"highlight video ({seconds / 60:.1f} min)"
+            else:
+                cost = billing.credits_for_job(len(resolved_clips), hq, adv)
+                what = f"These {len(resolved_clips)} clips need"
+                note = f"{len(resolved_clips)} clip(s)"
             # Remembered so the failure handler can give it back. Everything
             # after this point can still fail -- the source download is the
             # likeliest, since YouTube can refuse it long after the transcript
             # was paid for -- and a user billed for clips they never received
             # is the worst bug this file can have.
             charged_credits = cost
-            if not billing.charge(job_user_id, cost, job_id=job_id,
-                                  note=f"{len(resolved_clips)} clip(s)"):
+            if not billing.charge(job_user_id, cost, job_id=job_id, note=note):
                 have = billing.balance(job_user_id)
                 update_job(
                     job_id, status="failed",
-                    error=(f"These {len(resolved_clips)} clips need {cost} credits "
-                           f"and you have {have}. Top up and run it again -- "
-                           f"you were not charged."),
+                    error=(f"{what} {cost} credits and you have {have}. Top up "
+                           f"and run it again -- you were not charged."),
                 )
                 workspace.clear_intermediates(job_dir)
                 return
 
+        noun = "highlight video" if highlight_video else "clips"
         update_job(job_id, status="rendering",
-                   progress_message="Preparing your clips...", percent=0)
+                   progress_message=f"Preparing your {noun}...", percent=0)
         if uploaded_source:
             workspace.ensure_space(job_dir, os.path.getsize(video_path))
             update_job(job_id, progress_message="Getting the full video ready...", percent=0)
@@ -2421,16 +2537,37 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
         # encodes of ~105s each, so they cost a background core, not the clips'
         # latency. Nothing waits on this thread: if it loses the race the editor
         # shows its "preparing" state for that clip, which is the truth.
-        proxy_thread = threading.Thread(
-            target=_build_proxies_quietly,
-            args=(job_id, video_path, job_dir,
-                  [{"start": c["start"], "end": c["end"]} for c in resolved_clips],
-                  source_seconds),
-            daemon=True,
-        )
-        proxy_thread.start()
+        if not highlight_video:
+            # Editor proxies are per clip; a highlight video is not edited
+            # clip by clip, so it has nothing to scrub.
+            proxy_thread = threading.Thread(
+                target=_build_proxies_quietly,
+                args=(job_id, video_path, job_dir,
+                      [{"start": c["start"], "end": c["end"]} for c in resolved_clips],
+                      source_seconds),
+                daemon=True,
+            )
+            proxy_thread.start()
 
         out_w, out_h = render.RATIOS.get(req.ratio, render.RATIOS["9:16"])
+        # A wide highlight video keeps the whole original picture (a source
+        # that is not 16:9 sits on a blurred fill of itself, not black bars);
+        # anything else is framed exactly as clips are.
+        frame = "blur" if highlight_video and req.ratio == "16:9" else tpl["frame"]
+        if frame != "gameplay":
+            gameplay_loops = []
+        # Clip-only touches: a title card per clip, a music bed under every
+        # clip, a whoosh on every layout cut and keyword punch-ins all belong
+        # to a short post, not to minutes of one continuous video.
+        burn_title = req.burn_title and not highlight_video
+        use_music = req.music_bed and not highlight_video
+        use_sfx = req.auto_sfx and not highlight_video
+        use_zoom = req.auto_zoom and not highlight_video
+
+        def part_name(i: int) -> str:
+            return (f"{highlight.WORK_PREFIX}seg_{i}.mp4" if highlight_video
+                    else f"clip_{i}.mp4")
+
         if gameplay_loops:
             margin_v = render.split_caption_margin_v(out_h)
         else:
@@ -2441,7 +2578,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
             place = {"podcast": render.podcast_caption_margin_v,
                      "auto": render.fit_caption_margin_v,
                      "fit": render.fit_caption_margin_v}.get(
-                         tpl["frame"], render.caption_margin_v)
+                         frame, render.caption_margin_v)
             margin_v = place(src_w, src_h, out_w, out_h)
 
         # -- Prepare each clip (subtitles, reframing, voiceover) sequentially,
@@ -2458,13 +2595,13 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
             clip_plan = None
             clip_margin_v = margin_v
             lock_margin = bool(gameplay_loops)
-            if tpl["frame"] in ("podcast", "auto"):
+            if frame in ("podcast", "auto"):
                 try:
                     zoom_windows = (reframe._keyword_windows(
                                         clip_words, clip.get("keywords"),
                                         clip.get("title"))
-                                    if req.auto_zoom else None)
-                    if tpl["frame"] == "auto":
+                                    if use_zoom else None)
+                    if frame == "auto":
                         clip_plan = content.plan(
                             video_path, clip["start"], clip["end"], out_w, out_h,
                             speaker_words=clip_words, zoom_windows=zoom_windows,
@@ -2499,7 +2636,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                     and not clip.get("highlight")):
                 segments, clip_words, removed = pacing.tighten(
                     clip_words, clip["start"], clip["end"],
-                    max_pause=pacing.max_pause_for_frame(tpl["frame"]))
+                    max_pause=pacing.max_pause_for_frame(frame))
                 if removed < 0.4:
                     segments, clip_words = None, clip["words"]
                 else:
@@ -2511,13 +2648,13 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                                  if clip_plan else None)
             sfx_events = []
             whoosh = render.whoosh_path()
-            if req.auto_sfx and clip_plan and whoosh:
+            if use_sfx and clip_plan and whoosh:
                 sfx_events = [
                     {"path": whoosh, "time": t, "gain": 0.26}
                     for t in reframe.cut_times(clip_plan, clip["start"], segments)
                 ]
             music_path = (music.path_for(genre, clip.get("title", ""), variant=i)
-                          if req.music_bed else None)
+                          if use_music else None)
 
             mute_spans = None
             caption_words = clip_words
@@ -2529,7 +2666,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
 
             emoji_overlays = []
             if req.mode == "original":
-                clip_title = clip.get("title", "") if req.burn_title else ""
+                clip_title = clip.get("title", "") if burn_title else ""
                 if req.burn_subtitles and clip_words:
                     subtitle_path = os.path.join(job_dir, f"clip_{i}.ass")
                     caption_preset_id = caption_presets.get(req.caption_style)["id"]
@@ -2576,7 +2713,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                 clip["voiceover_script"] = script_text
                 end_time = clip["start"] + 9999
 
-            out_name = f"clip_{i}.mp4"
+            out_name = part_name(i)
             prepared.append({
                 "index": i,
                 "clip": clip,
@@ -2593,7 +2730,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                     gameplay_path=(gameplay_loops[(i - 1) % len(gameplay_loops)]
                                    if gameplay_loops else None),
                     ratio=req.ratio,
-                    frame=tpl["frame"],
+                    frame=frame,
                     segments=segments,
                     mute_spans=mute_spans,
                     reframe_plan=clip_plan,
@@ -2625,12 +2762,15 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                 done_count += 1
                 update_job(
                     job_id,
-                    progress_message=f"Finishing clips... {done_count} of {total} done",
-                    percent=round(50 + done_count / total * 50),
+                    progress_message=(
+                        f"Rendering part {done_count} of {total}..." if highlight_video
+                        else f"Finishing clips... {done_count} of {total} done"),
+                    percent=round(50 + done_count / total * (40 if highlight_video else 50)),
                 )
 
         update_job(job_id,
-                   progress_message=f"Finishing {total} clips...",
+                   progress_message=(f"Rendering the {total} parts of your highlight video..."
+                                     if highlight_video else f"Finishing {total} clips..."),
                    percent=50)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as pool:
@@ -2638,28 +2778,52 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
             for future in concurrent.futures.as_completed(futures):
                 future.result()  # raises if a render failed
 
-        # -- Collect results in clip order.
-        results = []
-        for item in prepared:
-            clip = item["clip"]
-            shown_score, shown_scores = scoring.presentation_score(
-                clip.get("score") or 0, clip.get("scores") or {})
-            results.append({
-                "file": item["out_name"],
-                "title": clip["title"],
-                "hook": clip["hook"],
-                "start": clip["start"],
-                "end": clip["end"],
-                "duration": round(item["render_duration"], 1),
-                "score": shown_score,
-                "scores": shown_scores,
-                "voiceover_script": clip.get("voiceover_script"),
-                # Auto Zoom and keyword colouring both read this back on a
-                # re-export. Dropping it here made the editor's "Auto Zoom"
-                # toggle do nothing, because the only copy lived in memory.
-                "keywords": clip.get("keywords") or [],
-                "words": item["clip_words"],
-            })
+        if highlight_video:
+            # The parts are only material: the deliverable is the one video
+            # they are joined into. A failure here fails the job (and refunds
+            # it) -- there is nothing else to hand over.
+            update_job(job_id, progress_message="Editing your highlight video...",
+                       percent=92)
+            info = highlight.build(
+                job_dir,
+                [{"file": item["out_name"],
+                  "title": item["clip"].get("title") or "",
+                  "score": item["clip"].get("score") or 0,
+                  "source_start": item["clip"]["start"],
+                  "source_end": item["clip"]["end"],
+                  "words": _clip_timeline_words(item)} for item in prepared],
+                out_w, out_h, genre=genre, title=req.source_title or "",
+                memes=req.highlight_memes, tags=req.highlight_tags,
+                high_quality=bool(job_options.get("high_quality")))
+            job_options = {**job_options, "highlight": info}
+            update_job(job_id, options=job_options)
+            print(f"[clipper] job {job_id}: highlight video {info['duration'] / 60:.1f} min, "
+                  f"{info['segments']} part(s), {info['memes']} meme beat(s)")
+            results, deliverables = [], [info["file"]]
+        else:
+            # -- Collect results in clip order.
+            results = []
+            for item in prepared:
+                clip = item["clip"]
+                shown_score, shown_scores = scoring.presentation_score(
+                    clip.get("score") or 0, clip.get("scores") or {})
+                results.append({
+                    "file": item["out_name"],
+                    "title": clip["title"],
+                    "hook": clip["hook"],
+                    "start": clip["start"],
+                    "end": clip["end"],
+                    "duration": round(item["render_duration"], 1),
+                    "score": shown_score,
+                    "scores": shown_scores,
+                    "voiceover_script": clip.get("voiceover_script"),
+                    # Auto Zoom and keyword colouring both read this back on a
+                    # re-export. Dropping it here made the editor's "Auto Zoom"
+                    # toggle do nothing, because the only copy lived in memory.
+                    "keywords": clip.get("keywords") or [],
+                    "words": item["clip_words"],
+                })
+            deliverables = [clip["file"] for clip in results]
 
         # Publish BEFORE marking the job done. The status is what makes clips
         # downloadable in the UI, so flipping it first opens a window where a
@@ -2672,10 +2836,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
         # is not on local disk. `storage.ensure_local` fetches it back.
         # Proxies are NOT in this list -- they publish themselves as each one
         # finishes, on a thread that outlives this function.
-        published = storage.publish(job_id, job_dir, [
-            *[clip["file"] for clip in results],
-            "source.mp4",
-        ])
+        published = storage.publish(job_id, job_dir, [*deliverables, "source.mp4"])
         if published:
             print(f"[clipper] job {job_id}: published {published} file(s) to "
                   f"{storage.driver.name}")
@@ -2704,7 +2865,8 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                       f"failed job {job_id}")
 
         raw = str(e) or e.__class__.__name__
-        if "No speech was found" in raw or "Nothing in this video scored" in raw:
+        if ("No speech was found" in raw or "Nothing in this video scored" in raw
+                or raw == HIGHLIGHT_TOO_SHORT):
             message = raw
         elif "longer than" in raw and "limit" in raw:
             message = "This video is longer than your plan allows. Choose a shorter video or upgrade for longer sources."

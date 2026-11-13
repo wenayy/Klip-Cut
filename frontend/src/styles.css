@@ -1491,6 +1491,79 @@ body::after {
   margin-inline: auto;
 }
 
+/* A highlight video: one player, with its moments as chapters beside it. */
+.highlight-result {
+  margin: 40px auto 0;
+  max-width: 1100px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr);
+  gap: 24px;
+  align-items: start;
+  padding: 18px;
+  text-align: left;
+  background: var(--surface);
+  border: 1.5px solid var(--violet);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 44px -30px rgba(91, 33, 182, 0.45);
+  animation: rise 0.7s var(--ease-out) both;
+}
+.highlight-player {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 14px;
+}
+.highlight-result.ratio-9x16 { grid-template-columns: minmax(0, 300px) minmax(0, 1fr); }
+.highlight-result.ratio-9x16 .highlight-player { aspect-ratio: 9 / 16; max-height: 70vh; }
+.highlight-result.ratio-1x1 .highlight-player { aspect-ratio: 1; }
+.highlight-eyebrow {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--violet);
+}
+.highlight-side h3 { margin: 6px 0 6px; font-size: 22px; color: var(--ink); }
+.highlight-side p { margin: 0 0 16px; color: var(--ink-soft); }
+.highlight-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.highlight-chapters {
+  list-style: none;
+  margin: 18px 0 0;
+  padding: 0;
+  max-height: 340px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+}
+.highlight-chapters button {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 10px;
+  width: 100%;
+  padding: 9px 4px;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  cursor: pointer;
+}
+.highlight-chapters button:hover,
+.highlight-chapters button:focus-visible { background: rgba(109, 40, 217, 0.07); }
+.chap-time {
+  grid-row: 1 / span 2;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--violet);
+}
+.chap-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chap-source { font-size: 12px; color: var(--ink-faint); }
+
+@media (max-width: 760px) {
+  .highlight-result,
+  .highlight-result.ratio-9x16 { grid-template-columns: 1fr; gap: 16px; }
+}
+
 .clip-card {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -4114,6 +4187,18 @@ body::after {
   overflow-wrap: break-word;
 }
 
+/* Headline look: the big line sits on its highlighter bar, the rest below. */
+.cap-headline { display: inline-block; padding: 0 0.12em; white-space: nowrap; }
+.cap-headline-small { display: block; white-space: nowrap; }
+
+/* Mirrors the renderer's bounce: drops in small, overshoots, dips, lands. */
+@keyframes capBounce {
+  0% { transform: scale(0.6); }
+  39% { transform: scale(1.18); }
+  74% { transform: scale(0.93); }
+  100% { transform: scale(1); }
+}
+
 /* Matches the short ASS entrance applied to the first event of each cue. The
    key on .cap-inner restarts this only when a new cue appears, not every time
    the active word advances. */
@@ -5244,17 +5329,34 @@ body::after {
 .cap-card.stacked .cap-sample { flex-direction: row; row-gap: 0; line-height: 1; }
 .cap-card.stacked .cap-word.big { flex-basis: 100%; text-align: center; }
 .cap-card.stacked .cap-word.big .cap-word-rest { color: var(--active); }
-/* Reveal looks: a word is not there until it is spoken. */
-.cap-card.reveal .cap-word-rest { visibility: hidden; }
-.cap-card.reveal .cap-word-lit {
-  animation-name: capReveal; animation-timing-function: steps(1, end);
-}
-@keyframes capReveal {
-  0% { opacity: 1; }
-  92%, 100% { opacity: 0; }
-}
+/* Reveal looks show the whole line in the picker. Hiding unspoken words made
+   a card read as half a caption ("THAT WAS" with no "INSANE") most of the
+   time; the card is there to show the look, and the pop still travels. */
 .cap-card.boxed .cap-word-rest,
 .cap-card.boxed .cap-word-lit { text-shadow: none; }
+/* A plate needs room around its text, or the words touch its edges. */
+.cap-card.boxed .cap-sample { padding: .25em .5em; border-radius: 6px; }
+/* A backdrop band hugs its text instead of filling the card. */
+.cap-card.band .cap-sample { width: fit-content; max-width: 100%; border-radius: 4px; }
+/* Headline looks: the first word(s) big on a highlighter bar, the rest small
+   on the line below. */
+.cap-card.headline .cap-sample { row-gap: .12em; line-height: 1.05; }
+.cap-card.headline .cap-break { flex-basis: 100%; height: 0; }
+.cap-card.headline .cap-word.head .cap-word-rest {
+  background: linear-gradient(to bottom, transparent 52%, var(--bar) 52%);
+  padding: 0 .1em;
+}
+/* Bounce: each word drops in small, overshoots and lands on its turn. */
+.fx-bounce .cap-word {
+  animation: capBounceCycle var(--cycle) ease-out infinite;
+  animation-delay: calc(var(--i) * (var(--cycle) / var(--n)));
+}
+@keyframes capBounceCycle {
+  0% { transform: scale(.6); }
+  4% { transform: scale(1.18); }
+  8% { transform: scale(.93); }
+  11%, 100% { transform: scale(1); }
+}
 
 @keyframes capLit {
   0%, 32% { opacity: 1; }
@@ -5506,3 +5608,8 @@ body::after {
 @media (max-width: 480px) {
   .nav-myclips { display: none; }
 }
+
+/* A highlight job is one wide video, not a row of vertical clips. */
+.skel-card.wide { max-width: 420px; margin-inline: auto; }
+.skel-card.wide .skel-shimmer { aspect-ratio: 16 / 9; height: auto; }
+.job-thumbs.wide video { width: 76px; height: 43px; }

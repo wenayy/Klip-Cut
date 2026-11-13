@@ -51,6 +51,7 @@ ACTIVE_EFFECTS = {
     "glow":     {"name": "Glow",     "desc": "Coloured halo on the word",   "web": "glow"},
     "marker":   {"name": "Marker",   "desc": "Highlighter swipe behind it", "web": "marker"},
     "progress": {"name": "Fill",     "desc": "Word fills left to right",    "web": "progress"},
+    "bounce":   {"name": "Bounce",   "desc": "Word drops in and bounces",   "web": "bounce"},
 }
 
 # Effects that need the base style to carry a box, because they paint one.
@@ -107,6 +108,26 @@ BLACK = "&H00000000"
 HOT_PINK = "&H009314FF"
 ELECTRIC = "&H00FFE100"  # electric cyan
 VIOLET = "&H00F65C8B"
+PALE_YELLOW = "&H007CF0F4"   # soft lemon, for type on a dark backdrop
+DEEP_GREEN = "&H002A5E2E"    # the thick sticker stroke of the bounce look
+BACKDROP = "&H40141414"      # a dark band at ~75% opacity
+
+# Keywords rotate through a small palette, so the words a clip is about do not
+# all wear one colour: the first keyword takes the preset's own keyword colour,
+# the next ones the rest of the palette, and a keyword keeps its colour every
+# time it comes back. Colours in the same family as the resting text or the
+# spoken-word highlight are skipped, or a keyword would look like either.
+KEYWORD_ROTATION = [YELLOW, GREEN, CYAN, HOT_PINK]
+_FAMILY = {
+    YELLOW: "yellow", PALE_YELLOW: "yellow", ORANGE: "yellow",
+    LIME: "green", GREEN: "green",
+    CYAN: "blue", ELECTRIC: "blue", BLUE: "blue",
+    RED: "red", HOT_PINK: "red", MAGENTA: "red",
+    W: "white", CREAM: "white",
+}
+# Looks whose point is calm keep one keyword colour.
+CALM_CATEGORIES = {"podcast", "cinematic", "clean", "story"}
+PALETTE_SIZE = 3
 
 # Defaults every preset inherits, so an entry only states what is unusual about
 # it. Without this each preset was 12 near-identical lines and the differences
@@ -150,12 +171,41 @@ DEFAULTS = {
     "stack_small": 58,       # stack mode: size of the top line, % of the bottom
     # With box="word": stroke the text and draw the chip on a layer underneath,
     # so words that are NOT being spoken stay readable over a bright frame.
+    # With box="line" the same layer is a backdrop band behind outlined text.
     "text_outline": None,
+    "italic": False,
+    # headline mode: a highlighter bar in this colour behind the lower part of
+    # the big first line.
+    "bar": None,
+    # Extra sideways padding on a backdrop band, so it reads as a band rather
+    # than a box hugging the words.
+    "pad_x": None,
+    # An explicit keyword palette; None derives one (see keyword_palette).
+    "keyword_colors": None,
 }
 
 
 def _p(id, name, category, **kw):
     return {**DEFAULTS, "id": id, "name": name, "category": category, **kw}
+
+
+def keyword_palette(p: dict) -> list:
+    """The colours this look's keywords rotate through, in ASS form."""
+    if p.get("keyword_colors"):
+        return list(p["keyword_colors"])
+    if p.get("legacy") or p.get("category") in CALM_CATEGORIES:
+        return [p["keyword"]]
+    taken = {_FAMILY.get(p["base"], p["base"]), _FAMILY.get(p["active"], p["active"])}
+    palette, families = [p["keyword"]], {_FAMILY.get(p["keyword"], p["keyword"])}
+    for colour in KEYWORD_ROTATION:
+        family = _FAMILY.get(colour, colour)
+        if family in taken or family in families:
+            continue
+        palette.append(colour)
+        families.add(family)
+        if len(palette) == PALETTE_SIZE:
+            break
+    return palette
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +234,26 @@ _LIST = [
     # IS -- gameplay, podcast, story -- because that is how people choose, and
     # the first three of each kind are what Auto reaches for by genre.
     #
+    # Headline: the first word huge over a highlighter bar, the rest small
+    # underneath, heavy 3D drop. Reads as a designed title on every line.
+    _p("sig_headline", "Headline", "signature",
+       font_id="archivoblack", size=124, uppercase=True, base=W, active=W,
+       outline=6, shadow=8, shadow_color=BLACK, keyword=YELLOW,
+       mode="headline", stack_small=52, bar=VIOLET, active_effect="pop",
+       max_words=3, position="lower"),
+    # Backdrop: soft italic type in lemon on a dark band -- calm, legible on
+    # any frame, and still clearly designed.
+    _p("sig_backdrop", "Backdrop", "signature",
+       font_id="lilitaone", size=104, base=PALE_YELLOW, active=PALE_YELLOW,
+       italic=True, outline=16, text_outline=4, box="line", box_color=BACKDROP,
+       pad_x=44, keyword=CYAN, keyword_colors=[CYAN, HOT_PINK, ORANGE],
+       active_effect="pop", max_words=3, position="lower"),
+    # Bounce: rounded type in a thick dark-green sticker stroke; each word
+    # drops in and bounces as it is said.
+    _p("sig_bounce", "Bounce", "signature",
+       font_id="titanone", size=108, base=W, active=LIME, outline=12,
+       outline_color=DEEP_GREEN, keyword=YELLOW, active_effect="bounce",
+       reveal=True, max_words=3, position="lower"),
     # Gameplay: loud, fast, reads over a busy frame.
     _p("sig_beast", "Beast", "signature",
        font_id="bangers", size=134, uppercase=True, base=W, active=YELLOW,
@@ -436,12 +506,17 @@ def get(preset_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def ass_to_css(colour: str) -> str:
-    """&HAABBGGRR -> #RRGGBB. Alpha is dropped; nothing here is translucent."""
+    """&HAABBGGRR -> #RRGGBB, or rgba() for a translucent colour (a backdrop)."""
     if not colour:
         return "#ffffff"
-    h = colour.replace("&H", "").replace("&", "")
-    h = h.rjust(8, "0")[-6:]        # BBGGRR
-    return f"#{h[4:6]}{h[2:4]}{h[0:2]}"
+    h = colour.replace("&H", "").replace("&", "").rjust(8, "0")[-8:]
+    alpha, bgr = h[:2], h[2:]
+    rgb = f"#{bgr[4:6]}{bgr[2:4]}{bgr[0:2]}"
+    if alpha.upper() == "00":
+        return rgb
+    opacity = round(1 - int(alpha, 16) / 255, 2)       # ASS alpha is inverted
+    return (f"rgba({int(bgr[4:6], 16)},{int(bgr[2:4], 16)},"
+            f"{int(bgr[0:2], 16)},{opacity})")
 
 
 def css_to_ass(colour: str) -> str:
@@ -506,6 +581,10 @@ def web_presets() -> dict:
             "reveal": p["reveal"],
             "stackSmall": p["stack_small"],
             "textOutline": p["text_outline"],
+            "italic": bool(p.get("italic")),
+            "bar": ass_to_css(p["bar"]) if p.get("bar") else None,
+            "padX": p.get("pad_x"),
+            "keywordColors": [ass_to_css(c) for c in keyword_palette(p)],
         })
     return {
         "categories": CATEGORIES,

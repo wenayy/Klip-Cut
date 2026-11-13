@@ -53,6 +53,13 @@ export function usePlan(user) {
          two ever disagree. */
       highQualityPerClip: catalogue?.extras?.high_quality_per_clip ?? 5,
       advancedModelPerJob: catalogue?.extras?.advanced_model_per_job ?? 10,
+      /* A highlight video is one deliverable priced by its finished length. */
+      highlightPerMinute: catalogue?.extras?.highlight_per_minute ?? 5,
+      highQualityPerHighlightMinute: catalogue?.extras?.high_quality_per_highlight_minute ?? 2,
+      highlight: catalogue?.highlight ?? {
+        min_source_minutes: 8, max_minutes: 15, choices: [5, 10, 15],
+        auto_share: 0.15, min_auto_minutes: 3,
+      },
       can,
     };
   }, [user, catalogue]);

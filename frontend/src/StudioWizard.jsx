@@ -16,7 +16,7 @@ import CaptionPresetPicker, { useCaptionPresets } from "./CaptionPresets";
 
 const STEPS = [
   { n: 1, id: "source", name: "Video", hint: "Add a link or file" },
-  { n: 2, id: "prefs", name: "Style", hint: "Choose the look" },
+  { n: 2, id: "prefs", name: "Make", hint: "Clips or a highlight video" },
   { n: 3, id: "review", name: "Review", hint: "Confirm and start" },
 ];
 
@@ -149,18 +149,40 @@ export default function StudioWizard({
     || !can("tighten_pauses") || !can("multilingual");
 
   const clipOptions = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  const isHighlight = prefs.output === "highlight";
+  const hl = plan.highlight;
+  const sourceSeconds = Number(prefs.sourceSeconds) || 0;
+  const highlightTooShort = sourceSeconds > 0 && sourceSeconds < hl.min_source_minutes * 60;
+  /* Mirrors highlight.target_seconds: ~15% of the source, 3 to 15 minutes. */
+  const autoMinutes = sourceSeconds
+    ? Math.round(Math.max(hl.min_auto_minutes, Math.min(hl.max_minutes, (sourceSeconds * hl.auto_share) / 60)))
+    : null;
+  const highlightMinutes = prefs.highlightMinutes
+    ? Math.min(prefs.highlightMinutes, sourceSeconds ? Math.floor((sourceSeconds * 0.6) / 60) || 1 : prefs.highlightMinutes)
+    : (autoMinutes || hl.min_auto_minutes);
   /* Mirrors billing.credits_for_job: quality is per clip because a render runs
      once per clip, the model is per job because the analysis runs once however
      many clips come out of it. The rates come from the server (see usePlan) so
      only this shape is duplicated, not the numbers -- and the pre-flight 402 is
      what catches it if even the shape drifts. */
-  const costLines = [{
+  /* Mirrors billing.credits_for_highlight for a highlight video: priced by its
+     finished length, which is only known after the moments are chosen -- so
+     this is the estimate the review step labels as one. */
+  const costLines = isHighlight ? [{
+    label: `Highlight video, about ${highlightMinutes} min`,
+    detail: `${plan.highlightPerMinute} credits per minute`,
+    credits: highlightMinutes * plan.highlightPerMinute,
+  }] : [{
     label: `${prefs.nClips} clip${prefs.nClips === 1 ? "" : "s"}`,
     detail: `${plan.creditsPerClip} credits each`,
     credits: prefs.nClips * plan.creditsPerClip,
   }];
   if (prefs.highQuality) {
-    costLines.push({
+    costLines.push(isHighlight ? {
+      label: "High quality",
+      detail: `${plan.highQualityPerHighlightMinute} credits per minute`,
+      credits: plan.highQualityPerHighlightMinute * highlightMinutes,
+    } : {
       label: "High quality",
       detail: `${plan.highQualityPerClip} credits per clip`,
       credits: plan.highQualityPerClip * prefs.nClips,
@@ -174,6 +196,15 @@ export default function StudioWizard({
     });
   }
   const cost = costLines.reduce((sum, line) => sum + line.credits, 0);
+
+  /* The video size follows the product unless someone chose otherwise: a
+     highlight video is a YouTube video, clips are vertical posts. */
+  function chooseOutput(value) {
+    if (value === "highlight" && highlightTooShort) return;
+    prefs.setOutput(value);
+    if (value === "highlight" && prefs.ratio === "9:16") prefs.setRatio("16:9");
+    if (value === "clips" && prefs.ratio === "16:9") prefs.setRatio("9:16");
+  }
 
   function next() {
     if (step === 1 && !sourceReady) return;
@@ -249,14 +280,52 @@ export default function StudioWizard({
       {step === 2 && (
         <section className="wiz-panel" data-testid="wizard-panel-prefs">
           <header className="wiz-head">
-            <h3>Choose your starting look.</h3>
-            <p>These choices are used in the first export. You can still change each clip in the editor.</p>
+            <h3>What do you want to make?</h3>
+            <p>{isHighlight
+              ? "One video of the best parts of the whole thing, in the order they happened."
+              : "Short clips that each stand on their own. You can still change each clip in the editor."}</p>
           </header>
 
+          <div className="output-choice" role="radiogroup" aria-label="What to make">
+            <button type="button" role="radio" aria-checked={!isHighlight}
+                    className={`output-card ${!isHighlight ? "on" : ""}`}
+                    onClick={() => chooseOutput("clips")} data-testid="opt-output-clips">
+              <span className="output-shape clips" aria-hidden="true"><i /><i /><i /></span>
+              <strong>Short clips</strong>
+              <span>Vertical posts for TikTok, Reels and Shorts. Each one stands on its own.</span>
+            </button>
+            <button type="button" role="radio" aria-checked={isHighlight}
+                    className={`output-card ${isHighlight ? "on" : ""} ${highlightTooShort ? "disabled" : ""}`}
+                    onClick={() => chooseOutput("highlight")} disabled={highlightTooShort}
+                    data-testid="opt-output-highlight">
+              <span className="output-shape wide" aria-hidden="true"><i /></span>
+              <strong>Highlight video</strong>
+              <span>{highlightTooShort
+                ? `Needs a video of at least ${hl.min_source_minutes} minutes.`
+                : `One ${autoMinutes ? `~${autoMinutes}-minute ` : ""}video of the best parts, for YouTube.`}</span>
+            </button>
+          </div>
+
           <div className="pref-group">
-            <span className="pref-group-label">Clip setup</span>
+            <span className="pref-group-label">{isHighlight ? "Highlight setup" : "Clip setup"}</span>
             <div className="choice-stack">
-              <ChoiceButtons
+              {isHighlight && (
+                <ChoiceButtons
+                  label="Length"
+                  value={prefs.highlightMinutes ?? "auto"}
+                  options={[
+                    { value: "auto", label: autoMinutes ? `Auto · ~${autoMinutes} min` : "Auto",
+                      testid: "opt-hl-auto" },
+                    /* A length the source cannot fill is not offered at all. */
+                    ...hl.choices
+                      .filter((m) => !sourceSeconds || m * 60 <= sourceSeconds * 0.6)
+                      .map((m) => ({ value: m, label: `${m} min`, testid: `opt-hl-${m}` })),
+                  ]}
+                  onChange={(option) =>
+                    prefs.setHighlightMinutes(option.value === "auto" ? null : option.value)}
+                />
+              )}
+              {!isHighlight && <ChoiceButtons
                 label="Number of clips"
                 value={prefs.nClips}
                 className="clip-count-choice"
@@ -270,7 +339,7 @@ export default function StudioWizard({
                   if (option.locked) { onUpgrade("clips"); return; }
                   prefs.setNClips(option.value);
                 }}
-              />
+              />}
               <ChoiceButtons
                 label="Video size"
                 value={prefs.ratio}
@@ -290,12 +359,14 @@ export default function StudioWizard({
                 }))}
                 onChange={(option) => prefs.setGenre(option.value)}
               />
-              <ChoiceButtons
-                label="Clip length"
-                value={prefs.lengthPref}
-                options={Object.entries(LENGTHS).map(([value, label]) => ({ value, label }))}
-                onChange={(option) => prefs.setLengthPref(option.value)}
-              />
+              {!isHighlight && (
+                <ChoiceButtons
+                  label="Clip length"
+                  value={prefs.lengthPref}
+                  options={Object.entries(LENGTHS).map(([value, label]) => ({ value, label }))}
+                  onChange={(option) => prefs.setLengthPref(option.value)}
+                />
+              )}
             </div>
           </div>
 
@@ -305,9 +376,11 @@ export default function StudioWizard({
               <ToggleChip label="Captions" on={prefs.burnSubtitles}
                           onChange={prefs.setBurnSubtitles} testid="opt-captions"
                           title="Word-timed captions burned into the video" />
-              <ToggleChip label="Title" on={prefs.burnTitle}
-                          onChange={prefs.setBurnTitle} testid="opt-title"
-                          title="Burn a title card into the first few seconds of each clip" />
+              {!isHighlight && (
+                <ToggleChip label="Title" on={prefs.burnTitle}
+                            onChange={prefs.setBurnTitle} testid="opt-title"
+                            title="Burn a title card into the first few seconds of each clip" />
+              )}
               <ToggleChip label="Auto-censor" on={prefs.autoCensor}
                           onChange={prefs.setAutoCensor} testid="opt-censor"
                           title="Mutes profanity and stars it in captions, so clips stay monetisable" />
@@ -326,7 +399,9 @@ export default function StudioWizard({
           <div className="pref-group">
             <span className="pref-group-label">Output quality</span>
             <div className="options-row">
-              <ToggleChip label={`High quality  +${plan.highQualityPerClip}/clip`}
+              <ToggleChip label={isHighlight
+                            ? `High quality  +${plan.highQualityPerHighlightMinute}/min`
+                            : `High quality  +${plan.highQualityPerClip}/clip`}
                           on={prefs.highQuality}
                           onChange={prefs.setHighQuality}
                           testid="opt-high-quality"
@@ -348,9 +423,22 @@ export default function StudioWizard({
                           lockReason={() => onUpgrade("tighten_pauses")}
                           testid="opt-tighten"
                           title="Cuts the dead air so a clip feels edited rather than trimmed" />
+              {isHighlight && (
+                <>
+                  <ToggleChip label="Meme moments" on={prefs.highlightMemes}
+                              onChange={prefs.setHighlightMemes} testid="opt-hl-memes"
+                              title="A quick reaction beat after the biggest moments: a freeze, a punch-in, a caption and a sound" />
+                  <ToggleChip label="Time-jump tags" on={prefs.highlightTags}
+                              onChange={prefs.setHighlightTags} testid="opt-hl-tags"
+                              title={'"25 MIN LATER" where the video skips ahead, so viewers keep their place'} />
+                </>
+              )}
             </div>
           </div>
 
+          {/* A wide highlight video keeps the original picture; every other
+              output is framed by a layout. */}
+          {!(isHighlight && prefs.ratio === "16:9") && (
           <div className="pref-group">
             <span className="pref-group-label">Layout</span>
             <div className="template-grid">
@@ -380,6 +468,7 @@ export default function StudioWizard({
               })}
             </div>
           </div>
+          )}
 
           {prefs.burnSubtitles && (
             <div className="pref-group caption-pref-group">
@@ -433,14 +522,18 @@ export default function StudioWizard({
             <Row label="Source" value={source.mode === "upload"
               ? (source.file?.name || "Uploaded file")
               : (source.preview?.title || source.url)} />
-            <Row label="Clips" value={`${prefs.nClips} × ${LENGTHS[prefs.lengthPref].toLowerCase()}`} />
+            {isHighlight
+              ? <Row label="Make" value={`Highlight video · about ${highlightMinutes} min`} />
+              : <Row label="Make" value={`${prefs.nClips} clip${prefs.nClips === 1 ? "" : "s"} · ${LENGTHS[prefs.lengthPref].toLowerCase()}`} />}
             <Row label="Content" value={GENRES.find((g) => g.value === prefs.genre)?.label
               + " · " + GENRES.find((g) => g.value === prefs.genre)?.hint.toLowerCase()} />
-            <Row label="Format" value={`${prefs.ratio} · ${templates.find((t) => t.id === prefs.template)?.name || prefs.template}`} />
+            <Row label="Format" value={isHighlight && prefs.ratio === "16:9"
+              ? "16:9 · original picture"
+              : `${prefs.ratio} · ${templates.find((t) => t.id === prefs.template)?.name || prefs.template}`} />
             <Row label="Captions" value={prefs.burnSubtitles
               ? (captionData?.presets?.find((p) => p.id === prefs.captionStyle)?.name || "On")
               : "Off"} />
-            <Row label="Title" value={prefs.burnTitle ? "On" : "Off"} />
+            {!isHighlight && <Row label="Title" value={prefs.burnTitle ? "On" : "Off"} />}
             <Row label="Auto-censor" value={prefs.autoCensor ? "On" : "Off"} />
             <Row label="Tighten pauses"
                  value={prefs.tightenPauses && can("tighten_pauses") ? "On" : "Off"}
@@ -449,6 +542,8 @@ export default function StudioWizard({
                  value={prefs.multilingual && can("multilingual") ? "On" : "Off"}
                  muted={!can("multilingual")} />
             {prefs.intent.trim() && <Row label="Looking for" value={prefs.intent.trim()} />}
+            {isHighlight && <Row label="Meme moments" value={prefs.highlightMemes ? "On" : "Off"} />}
+            {isHighlight && <Row label="Time-jump tags" value={prefs.highlightTags ? "On" : "Off"} />}
             <Row label="Quality" value={prefs.highQuality ? "High" : "Standard"} />
             <Row label="Model" value={prefs.advancedModel ? "Advanced" : "Standard"} />
 
@@ -466,9 +561,14 @@ export default function StudioWizard({
                 ))}
               </div>
             )}
-            <Row label="Cost" value={plan.credits == null
+            <Row label="Cost" value={(isHighlight ? "about " : "") + (plan.credits == null
               ? `${cost} credits`
-              : `${cost} of your ${plan.credits} credits`} />
+              : `${cost} of your ${plan.credits} credits`)} />
+            {isHighlight && (
+              <p className="review-fineprint">
+                Charged by the finished length once the best parts are chosen.
+              </p>
+            )}
           </div>
 
           {plan.watermarked && (
@@ -519,6 +619,7 @@ export default function StudioWizard({
                     data-uploading={uploadPct != null ? "" : undefined}>
               {uploadPct == null
                 ? (submitting ? "Starting..."
+                   : isHighlight ? "Make highlight video"
                    : `Generate ${prefs.nClips} clip${prefs.nClips === 1 ? "" : "s"}`)
                 : uploadPct >= 1 ? "Processing..."
                 /* -1 means the browser could not size the body. Running the

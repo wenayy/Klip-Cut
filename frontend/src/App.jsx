@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { submitJob, uploadJob, getSourcePreview, getJob, clipUrl } from "./api";
+import HighlightResult from "./HighlightResult";
 import LiveEditor from "./LiveEditor";
 import Dashboard from "./Dashboard";
 import Pricing from "./Pricing";
@@ -309,8 +310,10 @@ function ProcessingStudio({ job, startedAt, onCancel }) {
       {!failed && (
         <div className="skeleton-row" aria-hidden="true">
           {/* capped: at 10 clips a full row of skeletons becomes slivers */}
-          {Array.from({ length: Math.min(job.options?.n_clips || 3, 5) }).map((_, i) => (
-            <div className="skel-card" key={i} style={{ animationDelay: `${i * 160}ms` }}>
+          {Array.from({ length: job.options?.output === "highlight" ? 1
+                                : Math.min(job.options?.n_clips || 3, 5) }).map((_, i) => (
+            <div className={`skel-card ${job.options?.output === "highlight" ? "wide" : ""}`}
+                 key={i} style={{ animationDelay: `${i * 160}ms` }}>
               <div className="skel-shimmer" />
               <span className="skel-line w70" />
               <span className="skel-line w45" />
@@ -578,6 +581,12 @@ export default function App() {
      chose. Priced in credits rather than gated, so Free can try them. */
   const [highQuality, setHighQuality] = useState(false);
   const [advancedModel, setAdvancedModel] = useState(false);
+  /* Clips and a highlight video are different products: N short standalone
+     posts, or ONE longer video of the best parts. Each has its own settings. */
+  const [output, setOutput] = useState("clips");
+  const [highlightMinutes, setHighlightMinutes] = useState(null);   // null = auto
+  const [highlightMemes, setHighlightMemes] = useState(true);
+  const [highlightTags, setHighlightTags] = useState(true);
   // The studio is a 3-step wizard now: 1 source, 2 preferences, 3 review.
   const [step, setStep] = useState(1);
   // The feature someone just reached for, so the upgrade dialog can name it.
@@ -952,8 +961,12 @@ export default function App() {
   useEffect(() => {
     if (job?.status === "done" && resultsRef.current) {
       resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
-      toast(`${job.clips?.length || 0} clip${job.clips?.length === 1 ? "" : "s"} ready`, {
-        detail: "Preview, trim, or download them below.", tone: "success" });
+      if (job.options?.output === "highlight") {
+        toast("Highlight video ready", { detail: "Watch it or download it below.", tone: "success" });
+      } else {
+        toast(`${job.clips?.length || 0} clip${job.clips?.length === 1 ? "" : "s"} ready`, {
+          detail: "Preview, trim, or download them below.", tone: "success" });
+      }
     }
     if (job?.status === "failed") {
       toast("That video couldn't be clipped", { detail: job.error, tone: "error" });
@@ -990,6 +1003,10 @@ export default function App() {
         intent: intent.trim(),
         highQuality,
         advancedModel,
+        output,
+        highlightMinutes: output === "highlight" ? highlightMinutes : null,
+        highlightMemes,
+        highlightTags,
       };
       const result = sourceMode === "upload"
         ? await uploadJob(uploadFile, {
@@ -1011,6 +1028,10 @@ export default function App() {
             intent: options.intent,
             high_quality: options.highQuality,
             advanced_model: options.advancedModel,
+            output: options.output,
+            highlight_minutes: options.highlightMinutes,
+            highlight_memes: options.highlightMemes,
+            highlight_tags: options.highlightTags,
           }, setUploadPct, turnstileToken)
         : await submitJob({ url: url.trim(), ...options, turnstileToken });
       const { job_id } = result;
@@ -1062,7 +1083,15 @@ export default function App() {
     // A job already running means this is a way back to its progress, not a new
     // run -- leaving it disabled stranded anyone who closed the studio mid-job.
     // With a source already in hand, skip straight to the choices.
-    if (!jobActive) setStep(sourceCanContinue ? 2 : 1);
+    if (!jobActive) {
+      // A FINISHED job is not where Continue should land. The studio shows a
+      // done job's results instead of the wizard, so a new video pasted after
+      // a run opened the previous run's clips until the page was reloaded.
+      // Old results stay one click away in My clips.
+      if (job) setJob(null);
+      setSubmitError(null);
+      setStep(sourceCanContinue ? 2 : 1);
+    }
   }
 
   function openStudio() {
@@ -1607,8 +1636,8 @@ export default function App() {
                   <span>KlipCut</span>
                   <em>Studio</em>
                 </div>
-                <h2>Make a new clip</h2>
-                <p className="dash-sub">Add a video, choose the look, then review and generate.</p>
+                <h2>Make something new</h2>
+                <p className="dash-sub">Add a video, choose clips or a highlight video, then review and generate.</p>
               </div>
               <button className="btn btn-ghost btn-sm" onClick={leaveAppView}>
                 Exit studio
@@ -1637,6 +1666,9 @@ export default function App() {
                   captionStyle, setCaptionStyle,
                   highQuality, setHighQuality,
                   advancedModel, setAdvancedModel,
+                  output, setOutput, highlightMinutes, setHighlightMinutes,
+                  highlightMemes, setHighlightMemes, highlightTags, setHighlightTags,
+                  sourceSeconds: sourceMode === "link" ? linkPreview?.duration : uploadDuration,
                 }}
                 plan={plan}
                 templates={TEMPLATES}
@@ -1670,15 +1702,21 @@ export default function App() {
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
                   <path d="m5 13 4 4L19 7" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
-                {job.clips.length} clip{job.clips.length === 1 ? "" : "s"} ready
+                {job.options?.output === "highlight"
+                  ? "Highlight video ready"
+                  : `${job.clips.length} clip${job.clips.length === 1 ? "" : "s"} ready`}
               </span>
               <h2 className="section-title">
                 Fresh out of <em className="serif grad">the studio.</em>
               </h2>
               <p className="section-sub">
-                Preview each clip, open the editor for changes, or download it when it feels right.
+                {job.options?.output === "highlight"
+                  ? "Watch it, jump to any moment, or download it for YouTube."
+                  : "Preview each clip, open the editor for changes, or download it when it feels right."}
               </p>
             </div>
+
+            <HighlightResult job={job} />
 
             <div className="clip-grid">
               {job.clips.map((clip, i) => (

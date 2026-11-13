@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { getCaptionOptions } from "./api";
 import { installFontFaces } from "./CaptionToolbar";
 
@@ -30,6 +30,18 @@ const SAMPLES = {
   story:     ["and", "then", "it", "happened"],
 };
 
+/* Looks that are about a layout rather than a category get their own line. */
+const PRESET_SAMPLES = {
+  sig_headline: ["clipping", "with", "AI"],
+  sig_backdrop: ["clipping", "with", "AI"],
+  sig_bounce: ["clipping", "with", "AI"],
+};
+
+/* Mirrors subtitles._headline_split. */
+const HEADLINE_STOP = new Set(["the", "a", "an", "and", "so", "but", "or", "to",
+  "of", "in", "on", "at", "it", "is", "i", "we", "you", "my", "your", "this",
+  "that", "for", "with", "if"]);
+
 const RAMP = ["#8040f0", "#d060e0", "#f080d0", "#60d0f0"];
 
 /** Inline style for one sample word, given the preset and the word's index. */
@@ -45,19 +57,32 @@ function wordStyle(p, i, active) {
     color: p.effect === "marker" ? p.color : p.active,
   };
   if (p.effect === "marker") {
+    /* The chip grows with a spread shadow, not padding: padding pushed the lit
+       copy's text off the resting copy underneath, so the word looked doubled. */
     s.background = p.boxColor || p.active;
+    s.boxShadow = `0 0 0 .14em ${p.boxColor || p.active}`;
+    s.borderRadius = 3;
     s.color = p.color;
   }
   if (p.effect === "glow") {
-    s.textShadow = `0 0 0.3em ${p.active}, 0 0 0.6em ${p.active}`;
+    /* Keep the stroke and add a tight halo. A wide halo in the word's own
+       colour, with the stroke dropped, melted short words into a blob. */
+    s.textShadow = "var(--stroke) 0 0 var(--ink), calc(-1 * var(--stroke)) 0 0 var(--ink), "
+      + "0 var(--stroke) 0 var(--ink), 0 calc(-1 * var(--stroke)) 0 var(--ink), "
+      + `0 0 .18em ${p.active}`;
   }
   return s;
 }
 
 function PresetCard({ preset, selected, onSelect, fontFamily }) {
   const p = preset;
-  const words = SAMPLES[p.category] || SAMPLES.karaoke;
+  const words = PRESET_SAMPLES[p.id] || SAMPLES[p.category] || SAMPLES.karaoke;
   const stacked = p.mode === "stack";
+  const headline = p.mode === "headline";
+  const split = headline
+    ? (words.length >= 3 && HEADLINE_STOP.has(words[0].toLowerCase()) ? 2 : 1)
+    : 0;
+  const band = p.box === "line" && p.textOutline != null;
   /* The card is a fixed size, so preset px (a number on the 1080-wide output
      canvas) has to be scaled to it rather than used raw -- otherwise a 112px
      Hormozi preset would render at 112px in a 150px-wide tile. */
@@ -68,17 +93,23 @@ function PresetCard({ preset, selected, onSelect, fontFamily }) {
     selected ? "on" : "",
     `fx-${p.effect}`,
     `mode-${p.mode}`,
-    p.box === "line" ? "boxed" : "",
+    p.box === "line" && !band ? "boxed" : "",
     stacked ? "stacked" : "",
-    p.reveal ? "reveal" : "",
+    headline ? "headline" : "",
+    /* No "reveal" modifier: the picker shows the whole line, and the name
+       collides with the landing page's opacity-0 scroll-in utility. */
+    band ? "band" : "",
   ].join(" ");
 
   const stage = {
     fontSize,
     letterSpacing: p.spacing ? `${p.spacing * 0.02}em` : undefined,
     textTransform: p.caps ? "uppercase" : "none",
+    fontStyle: p.italic ? "italic" : undefined,
     transform: p.rotate ? `rotate(${-p.rotate}deg)` : undefined,
     background: p.box === "line" ? p.boxColor : undefined,
+    padding: band ? `.25em ${Math.max(0.3, (p.padX || 0) / p.px)}em` : undefined,
+    "--bar": p.bar || "transparent",
     /* Outline is the renderer's stroke width in output px; as a share of the
        font size it survives the scaling above. */
     "--stroke": `${Math.min(0.09, ((p.textOutline ?? (p.box === "word" ? 0 : p.outline)) / p.px) * 0.9)}em`,
@@ -103,16 +134,24 @@ function PresetCard({ preset, selected, onSelect, fontFamily }) {
               the same box the line never reflows as the highlight moves --
               animating colour on a single span made every card twitch when the
               active word changed width under a scale effect. */}
-          {words.map((w, i) => (
-            <span key={i}
-                  className={`cap-word ${stacked && i === words.length - 1 ? "big" : ""}`}
-                  style={{ "--i": i, "--n": words.length,
-                           ...(stacked && i < words.length - 1
-                             ? { fontSize: `${(p.stackSmall || 58) / 100}em` } : null) }}>
-              <span className="cap-word-rest" style={wordStyle(p, i, false)}>{w}</span>
-              <span className="cap-word-lit" style={wordStyle(p, i, true)}>{w}</span>
-            </span>
-          ))}
+          {words.map((w, i) => {
+            const small = (stacked && i < words.length - 1) || (headline && i >= split);
+            const cls = ["cap-word",
+              stacked && i === words.length - 1 ? "big" : "",
+              headline && i < split ? "head" : "",
+              headline && i === split ? "sub-start" : ""].join(" ");
+            return (
+              <Fragment key={i}>
+                {headline && i === split && <span className="cap-break" aria-hidden="true" />}
+                <span className={cls}
+                      style={{ "--i": i, "--n": words.length,
+                               ...(small ? { fontSize: `${(p.stackSmall || 58) / 100}em` } : null) }}>
+                  <span className="cap-word-rest" style={wordStyle(p, i, false)}>{w}</span>
+                  <span className="cap-word-lit" style={wordStyle(p, i, true)}>{w}</span>
+                </span>
+              </Fragment>
+            );
+          })}
         </span>
       </span>
       <span className="cap-card-name">{p.name}</span>

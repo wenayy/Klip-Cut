@@ -70,7 +70,9 @@ const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/u;
    them outward, which is visibly not what burns in. A "line" box preset already
    has a plate behind it and wants no stroke at all. */
 function strokeShadow(st) {
-  if (st.box === "line") return "none";
+  /* A plain plate has no stroke; a backdrop band (textOutline set) strokes the
+     text on top of it. */
+  if (st.box === "line" && st.textOutline == null) return "none";
   const px = st.px || 76;
   /* A chip-layer preset strokes its text at textOutline; `outline` is then the
      chip's padding, not a stroke. */
@@ -104,7 +106,8 @@ function strokeShadow(st) {
    for that reason -- everything it reads was computed by the server. */
 const PREVIEW_RAMP = ["#8040f0", "#d060e0", "#f080d0", "#60d0f0"];
 
-function previewWordStyle(st, i, activeIndex, count, keyword = false) {
+function previewWordStyle(st, i, activeIndex, count, slot = undefined) {
+  const keyword = slot !== undefined;
   const active = i === activeIndex;
   /* Mirrors subtitles._compose: a stacked look draws its lead-in small on one
      line and the last word at full size on the next. */
@@ -124,9 +127,11 @@ function previewWordStyle(st, i, activeIndex, count, keyword = false) {
   // Phrase presets replace the whole chunk and mark nothing inside it -- except
   // keywords, which are the point of the line in every look.
   if (!active || st.mode === "phrase") {
-    return keyword ? { ...layout, ...keywordStyle(st) } : layout;
+    return keyword ? { ...layout, ...keywordStyle(st, slot) } : layout;
   }
   const lit = { ...layout, ...activeWordStyle(st) };
+  // A look whose highlight is pure motion keeps a keyword's colour while it pops.
+  if (keyword && st.active === st.color) lit.color = keywordColour(st, slot);
   // The big word of a stack owns its line whichever effect is marking it.
   if (big) lit.display = "block";
   return lit;
@@ -164,16 +169,48 @@ function keywordHits(words, keywords) {
   return hits;
 }
 
-function keywordStyle(st) {
-  const colour = st.keyword || st.active;
+/* Mirrors subtitles.keyword_slots: each distinct keyword (a run of hits) takes
+   the next palette colour the first time it is said and keeps it, so slots are
+   numbered across the whole clip, not per cue. */
+function keywordRuns(tokens, hits) {
+  const runs = [];
+  let run = [];
+  [...hits].sort((a, b) => a - b).forEach((i) => {
+    if (run.length && i !== run[run.length - 1] + 1) { runs.push(run); run = []; }
+    run.push(i);
+  });
+  if (run.length) runs.push(run);
+  return runs.map((r) => ({ idx: r, key: r.map((i) => keyToken(tokens[i])).join(" ") }));
+}
+
+function keywordColour(st, slot = 0) {
+  const palette = st.keywordColors?.length ? st.keywordColors : [st.keyword || st.active];
+  return palette[slot % palette.length];
+}
+
+function keywordStyle(st, slot = 0) {
+  const colour = keywordColour(st, slot);
   const scale = st.keywordScale && st.keywordScale !== 100 ? st.keywordScale
     : (colour === st.active || colour === st.color ? 112 : 100);
   return scale === 100 ? { color: colour }
     : { color: colour, display: "inline-block", transform: `scale(${scale / 100})` };
 }
 
+/* Mirrors subtitles._headline_split: a short function word goes up with the
+   word after it instead of becoming the giant word on its own. */
+const HEADLINE_STOP = new Set(["the", "a", "an", "and", "so", "but", "or", "to",
+  "of", "in", "on", "at", "it", "is", "i", "we", "you", "my", "your", "this",
+  "that", "for", "with", "if"]);
+
+function headlineSplit(words) {
+  return words.length >= 3 && HEADLINE_STOP.has(keyToken(words[0])) ? 2 : 1;
+}
+
 function activeWordStyle(st) {
   switch (st.effect) {
+    case "bounce":
+      return { color: st.active, display: "inline-block",
+               animation: "capBounce 230ms ease-out both" };
     case "marker":
       return { background: st.boxColor || st.active, color: st.color,
                padding: "0 .18em", borderRadius: 4 };
@@ -568,6 +605,8 @@ export default function LiveEditor({
       // recoloured base it reads as a second highlight nobody asked for. The
       // renderer makes the same substitution (subtitles._recolour).
       keyword: capColor || base.keyword,
+      // ...and keeps one keyword colour rather than the rotating palette.
+      keywordColors: capColor ? null : base.keywordColors,
       active: capActive || base.active,
     };
   }, [presetData, capStyle, capColor, capActive]);
@@ -729,6 +768,9 @@ export default function LiveEditor({
      renderer's zoom policy exactly. */
   const [outW, outH] = ratio === "1:1" ? [1080, 1080]
     : ratio === "16:9" ? [1920, 1080] : [1080, 1920];
+  /* Mirrors subtitles._fit_canvas: presets are designed on the 1080x1920
+     canvas, so a square or landscape frame scales caption sizes down. */
+  const canvasScale = outW > outH * 0.7 ? Math.min(1, Math.pow(outH / 1920, 0.6)) : 1;
   /* `fit` takes the same zoom as `blur` now -- the two differ in what fills the
      leftover height (flat colour vs a blurred copy), not in how big the picture
      is. It used to be the letterboxed height with no zoom at all. */
@@ -1099,6 +1141,26 @@ export default function LiveEditor({
     };
   }, [dragging, start, end, span, viewMap]);
 
+  /* Keyword colour slots for the whole clip, numbered by first appearance --
+     the renderer numbers them across the clip, not per cue. */
+  const kwSlots = useMemo(() => {
+    const slots = new Map();
+    if (!transcript?.utterances) return slots;
+    const tokens = [];
+    transcript.utterances.forEach((u, i) => {
+      if (u.end <= start || u.start >= end) return;
+      if (lineEdits[i] !== undefined) {
+        tokens.push(...lineEdits[i].split(/\s+/).filter(Boolean));
+      } else {
+        tokens.push(...(u.words || []).filter((w) => w.e > start && w.t < end).map((w) => w.w));
+      }
+    });
+    keywordRuns(tokens, keywordHits(tokens, clip.keywords)).forEach(({ key }) => {
+      if (!slots.has(key)) slots.set(key, slots.size);
+    });
+    return slots;
+  }, [transcript, start, end, lineEdits, clip.keywords]);
+
   /* The cue under the playhead, chunked exactly as the renderer will chunk it. */
   const cue = useMemo(() => {
     if (!transcript?.utterances) return null;
@@ -1130,9 +1192,14 @@ export default function LiveEditor({
 
     let activeIndex = active.findIndex((w) => now >= w.t && now <= w.e);
     if (activeIndex < 0) activeIndex = now > active[active.length - 1].e ? active.length - 1 : 0;
-    const kw = keywordHits(active.map((w) => w.w), clip.keywords);
-    return { words: active.map((w) => w.w), activeIndex, kw };
-  }, [transcript, now, lineEdits, st, capWords, clip.keywords]);
+    const tokens = active.map((w) => w.w);
+    const kw = new Map();
+    keywordRuns(tokens, keywordHits(tokens, clip.keywords)).forEach(({ idx, key }) => {
+      const slot = kwSlots.get(key) ?? 0;
+      idx.forEach((i) => kw.set(i, slot));
+    });
+    return { words: tokens, activeIndex, kw };
+  }, [transcript, now, lineEdits, st, capWords, clip.keywords, kwSlots]);
 
   /* One place that moves the playhead, so scrubbing from the trim bar, the
      layer strip or the transcript all behave identically -- including keeping
@@ -1566,12 +1633,17 @@ export default function LiveEditor({
                       /* The preset's own typeface unless one was picked by
                          hand -- the renderer resolves it in the same order. */
                       fontFamily: fontCss(capFont ?? st.font),
-                      fontSize: `${((capSize ?? st.px) / outW) * 100}cqw`,
+                      fontSize: `${((capSize ?? st.px) * canvasScale / outW) * 100}cqw`,
                       fontWeight: 900,
+                      fontStyle: st.italic ? "italic" : undefined,
                       color: st.color,
                       letterSpacing: st.spacing ? `${st.spacing * 0.02}em` : undefined,
                       transform: st.rotate ? `rotate(${-st.rotate}deg)` : undefined,
                       background: st.box === "line" ? st.boxColor : "transparent",
+                      /* A backdrop band is wider than tall (renderer: \xbord). */
+                      padding: st.box === "line" && st.padX
+                        ? `${(st.outline || 0) / (st.px || 76)}em ${st.padX / (st.px || 76)}em`
+                        : undefined,
                       /* The renderer's outline is a stroke around the glyphs, so
                          preview it as one. A blanket drop shadow made every
                          preset look identically "shadowed" regardless of the
@@ -1580,8 +1652,32 @@ export default function LiveEditor({
                       textTransform: st.caps ? "uppercase" : "none",
                     }}
                   >
-                    {cue.words.map((w, i) => (
-                      <span key={i} style={previewWordStyle(st, i, cue.activeIndex, cue.words.length, cue.kw?.has(i))}>
+                    {st.mode === "headline" ? (() => {
+                      /* Mirrors the renderer's headline: the first word(s) big
+                         over a highlighter bar, the rest small underneath. */
+                      const k = Math.min(headlineSplit(cue.words), cue.words.length);
+                      const word = (w, i) => (
+                        <span key={i} style={previewWordStyle(st, i, cue.activeIndex, cue.words.length, cue.kw?.get(i))}>
+                          {w}{" "}
+                        </span>
+                      );
+                      return (
+                        <>
+                          <span className="cap-headline" style={st.bar ? {
+                            background: `linear-gradient(to bottom, transparent 52%, ${st.bar} 52%)`,
+                          } : undefined}>
+                            {cue.words.slice(0, k).map((w, i) => word(w, i))}
+                          </span>
+                          {k < cue.words.length && (
+                            <span className="cap-headline-small"
+                                  style={{ fontSize: `${(st.stackSmall || 58) / 100}em` }}>
+                              {cue.words.slice(k).map((w, i) => word(w, i + k))}
+                            </span>
+                          )}
+                        </>
+                      );
+                    })() : cue.words.map((w, i) => (
+                      <span key={i} style={previewWordStyle(st, i, cue.activeIndex, cue.words.length, cue.kw?.get(i))}>
                         {w}{" "}
                       </span>
                     ))}

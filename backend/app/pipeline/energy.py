@@ -12,6 +12,10 @@ API cost and no added latency worth mentioning:
   dynamics     how much loudness swings inside the utterance (flat = monotone)
   pace         words per second, normalised (fast = excited, slow = weighty)
   pause_before silence in front of the line (a setup beat)
+  reaction     sound with NO words right after the line -- laughter, cheering,
+               a shout. Transcription drops non-speech, so a gap that is as
+               loud as talking is the room reacting. A clip followed by
+               laughter is the classic label for a funny moment.
 
 These become annotations on the transcript the model reads, so it can see where
 the room actually got loud.
@@ -86,6 +90,33 @@ def _frame_rms(pcm: bytes) -> list[float]:
     return rms.tolist()
 
 
+REACT_MIN_GAP = 0.4        # seconds without words that can hold a laugh
+REACT_MAX_GAP = 3.0        # only the moment right after the line counts
+REACT_SPEECH_RATIO = 0.8   # the gap must be nearly as loud as the talking
+
+
+def _mean_rms(frames: list, start: float, end: float) -> float:
+    first = max(0, int(start * 1000 / FRAME_MS))
+    last = min(int(end * 1000 / FRAME_MS), len(frames))
+    window = [f for f in frames[first:last] if f > 0]
+    return sum(window) / len(window) if window else 0.0
+
+
+def _reaction_gaps(utterances: list, idx: int) -> list:
+    """(start, end) spans with no transcribed words inside or right after a line."""
+    utt = utterances[idx]
+    words = utt.get("words") or []
+    gaps = []
+    for w0, w1 in zip(words, words[1:]):
+        if w1["start"] - w0["end"] >= REACT_MIN_GAP:
+            gaps.append((w0["end"], min(w1["start"], w0["end"] + REACT_MAX_GAP)))
+    following = (utterances[idx + 1]["start"] if idx + 1 < len(utterances)
+                 else utt["end"] + REACT_MAX_GAP)
+    if following - utt["end"] >= REACT_MIN_GAP:
+        gaps.append((utt["end"], min(following, utt["end"] + REACT_MAX_GAP)))
+    return gaps
+
+
 def _percentile(sorted_vals: list, pct: float) -> float:
     if not sorted_vals:
         return 0.0
@@ -151,6 +182,20 @@ def analyze(audio_path: str, utterances: list) -> list:
         previous_end = utt["end"]
     pause_rank = _ranks(pauses)
 
+    # Reaction: the loudest word-free gap inside or right after each line. Only
+    # gaps about as loud as the talking count -- an ordinary pause is room
+    # tone, a laugh or a cheer is not.
+    raw_react = []
+    for idx in range(len(utterances)):
+        level = 0.0
+        if frames:
+            level = max((_mean_rms(frames, a, b)
+                         for a, b in _reaction_gaps(utterances, idx)), default=0.0)
+        raw_react.append(level)
+    spoken = sorted(v for v in raw_loud if v > 0)
+    speech_level = _percentile(spoken, 0.5) if spoken else 0.0
+    react_rank = _ranks(raw_react)
+
     annotated = []
     for idx, utt in enumerate(utterances):
         info = dict(utt)
@@ -159,6 +204,9 @@ def analyze(audio_path: str, utterances: list) -> list:
         info["pace"] = pace_rank[idx]
         info["pause_before"] = round(pauses[idx], 2)
         info["pause_rank"] = pause_rank[idx]
+        info["reaction"] = (react_rank[idx]
+                            if speech_level and raw_react[idx]
+                            >= speech_level * REACT_SPEECH_RATIO else 0.0)
         annotated.append(info)
 
     return annotated
@@ -205,4 +253,6 @@ def summarize(utt: dict) -> str:
     # edit and a rambling stream, and only an unusual pause is a dramatic beat.
     if utt.get("pause_rank", 0) >= 9.5 and utt.get("pause_before", 0) >= 1.0:
         parts.append(f"pause:{utt['pause_before']:.1f}s")
+    if utt.get("reaction", 0) >= 9.0:
+        parts.append("REACT")
     return f"[{' '.join(parts)}] " if parts else ""

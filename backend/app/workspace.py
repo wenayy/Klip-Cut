@@ -26,7 +26,8 @@ DEFAULT_MAX_AGE_HOURS = int(os.environ.get("CLIPPER_RETENTION_HOURS", 24 * 30))
 
 # Everything a job writes that is disposable once the clips are rendered.
 INTERMEDIATE_SUFFIXES = (".m4a", ".webm", ".part", ".ytdl", ".src", ".ass", ".srt")
-INTERMEDIATE_PREFIXES = ("_ovtext_",)
+# "_hl_": a highlight video's rendered parts, teaser and meme beats.
+INTERMEDIATE_PREFIXES = ("_ovtext_", "_hl_")
 INTERMEDIATE_NAMES = ("audio.mp3",)
 
 

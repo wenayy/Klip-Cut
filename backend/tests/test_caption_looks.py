@@ -144,3 +144,71 @@ def test_keyword_sharing_the_highlight_colour_is_drawn_larger(tmp_path):
                  keywords=["claim"])
     # pro_caps uses one accent for keyword and spoken word; size tells them apart.
     assert "\\fscx112\\fscy112}CLAIM" in ass
+
+
+def _talk(text, keywords=None):
+    words, t = [], 0.2
+    for tok in text.split():
+        words.append({"word": tok.lower().strip("."), "punctuated_word": tok,
+                      "start": t, "end": t + 0.3})
+        t += 0.4
+    return words
+
+
+def test_keywords_rotate_colours_and_a_keyword_keeps_its_colour():
+    words = _talk("money talks and growth matters but money wins")
+    hits = subtitles.keyword_hits(words, ["money", "growth"])
+    slots = subtitles.keyword_slots(words, hits)
+    assert slots[0] == slots[6] == 0          # "money" both times
+    assert slots[3] == 1                      # "growth" is the next colour
+    palette = caption_presets.keyword_palette(caption_presets.PRESETS["sig_beast"])
+    assert len(set(palette)) == 3
+
+
+def test_calm_and_legacy_looks_keep_one_keyword_colour():
+    for pid in ("podcast_clean", "cinema_film", "classic"):
+        assert len(caption_presets.keyword_palette(caption_presets.PRESETS[pid])) == 1
+
+
+def test_headline_draws_a_bar_layer_under_the_big_line(tmp_path):
+    out = tmp_path / "h.ass"
+    subtitles.build_ass(_talk("clipping with ai"), 0.0, str(out), style="sig_headline")
+    ass = out.read_text()
+    assert "Style: CaptionBar," in ass
+    bars = [l for l in ass.splitlines() if ",CaptionBar," in l and l.startswith("Dialogue")]
+    caps = [l for l in ass.splitlines() if ",Caption," in l and l.startswith("Dialogue")]
+    assert bars and len(bars) == len(caps)
+    assert "\\q2" in bars[0] and "\\fsp" in bars[0] and "\\N" in bars[0]
+    assert "CLIPPING" in caps[0].split("\\N")[0]          # first word on the big line
+
+
+def test_backdrop_is_one_band_behind_outlined_text(tmp_path):
+    out = tmp_path / "b.ass"
+    subtitles.build_ass(_talk("clipping with ai"), 0.0, str(out), style="sig_backdrop")
+    ass = out.read_text()
+    chip = next(l for l in ass.splitlines() if l.startswith("Style: CaptionChip,"))
+    assert chip.split(",")[15] == "4"                      # one box per event
+    caption = next(l for l in ass.splitlines() if l.startswith("Style: Caption,"))
+    assert caption.split(",")[8] == "-1"                   # italic
+    assert any("\\xbord" in l for l in ass.splitlines() if ",CaptionChip," in l)
+
+
+def test_bounce_drops_in_and_overshoots():
+    tags = subtitles._active_override(caption_presets.PRESETS["sig_bounce"])
+    assert "\\fscx60" in tags and "\\fscx118" in tags and "\\fscx93" in tags
+
+
+def test_landscape_canvas_scales_caption_size():
+    st = subtitles._preset_style("sig_beast")
+    wide = subtitles._fit_canvas(st, (1920, 1080))
+    assert wide["size"] < st["size"] * 0.75
+    assert subtitles._fit_canvas(st, (1080, 1920))["size"] == st["size"]
+
+
+def test_every_caption_layer_moves_with_the_scene(tmp_path):
+    out = tmp_path / "g.ass"
+    subtitles.build_ass(_talk("that was insane"), 0.0, str(out), style="sig_arcade",
+                        positions=[{"start": 0.0, "end": 5.0, "pos": 0.6}])
+    for line in out.read_text().splitlines():
+        if line.startswith("Dialogue") and (",CaptionGlow," in line or ",Caption," in line):
+            assert "\\pos(" in line

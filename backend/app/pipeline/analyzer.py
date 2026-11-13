@@ -334,6 +334,10 @@ delivered -- information the words alone hide:
   fast      rapid delivery -- excitement or a rant
   slow      deliberate -- weight, emphasis
   pause:Ns  silence before the line -- often a setup beat or a reveal
+  REACT     loud sound with NO words right after the line: laughter, cheering,
+            a shout. The room reacting is the strongest sign a line landed --
+            the tagged line is usually the punchline or payoff. End the clip
+            just after the reaction, and include the setup that led to it
 
 Untagged lines are ordinary delivery. LOUD/dynamic/fast clusters are where the
 room came alive; that is usually where the clip is. But energy alone is not a
@@ -946,6 +950,49 @@ def _diversify(utterances, chosen, pool, n_clips):
     for clip in chosen + pool:
         clip.pop("_tokens", None)
     return selected
+
+
+# A highlight video is a different product from clips: one longer edit of
+# everything worth seeing, so the window pass is asked for complete segments
+# rather than standalone shorts, and nothing is compared head to head -- the
+# budget, not a count, decides how many survive (see highlight.select_segments).
+HIGHLIGHT_GUIDANCE = (
+    "this is for a HIGHLIGHT VIDEO of the whole recording, not a short. "
+    "Nominate COMPLETE segments of roughly 20 to 150 seconds -- the parts "
+    "someone who missed it must see: the key stories, reveals, decisions and "
+    "arguments, the funniest exchanges, the biggest reactions, and how it "
+    "ends. Each must make sense on its own with its setup included. Skip "
+    "intros, outros, sponsor reads and housekeeping.")
+
+
+def highlight_candidates(utterances: list, on_progress=None, intent: str = "",
+                         genre: str = "", model: str = None) -> list:
+    """Scored moments from across the whole transcript, with times in seconds.
+
+    The same windowed nomination pass the clips use, so a three-hour video is
+    read in full; what changes is what it is asked for and what happens next.
+    """
+    try:
+        candidates = _collect_candidates(
+            utterances, on_progress, intent=intent.strip(),
+            length_guidance=HIGHLIGHT_GUIDANCE, model=model or BULK_MODEL,
+            genre=genre)
+    except RuntimeError as exc:
+        if not LLM_FALLBACK:
+            raise
+        print(f"[clipper] model unavailable ({exc}); highlight falls back to "
+              f"mechanical speech runs")
+        candidates = []
+    if not candidates:
+        candidates = _fallback_candidates(utterances)
+    seen, pool = set(), []
+    for c in candidates:
+        key = (c["start_index"], c["end_index"])
+        if key in seen:
+            continue
+        seen.add(key)
+        pool.append(resolve_clip_times(c, utterances))
+    return pool
 
 
 def pick_clips(utterances: list, n_clips: int, on_progress=None,

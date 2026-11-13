@@ -51,7 +51,7 @@ MIN_SCORE = 0.55          # below this the box is usually a hand or a poster.
 # Increment whenever the JSON plan shape or its composition policy changes.
 # The editor includes this in its on-disk cache name, so an old global stacked
 # plan cannot survive a deployment and keep producing the bug that was fixed.
-PLAN_VERSION = 4
+PLAN_VERSION = 5
 
 # --- tracking --------------------------------------------------------------
 
@@ -92,6 +92,19 @@ CLASH_OVERLAP = 0.12
 GROUP_MIN_SPEECH = 0.20      # share of the scene the speaker shots must cover
 GROUP_HOLD_SECONDS = 4.0     # a silence shorter than this keeps the last speaker
 FEATURE_MIN_FACE = 0.14      # face height (share of frame) worth a close-up
+FEATURE_DOMINANCE = 1.8      # face AREA over the next one before a shot is "of" them
+
+# Speaker switching, as multicam podcast editors cut and as automated
+# switchers are tuned: a close-up is earned by holding the floor, no shot is
+# too short to read, the picture follows a new voice by a beat instead of
+# anticipating it, and fast back-and-forth stays on the home shot rather than
+# ping-ponging. Breaking these is what reads as constant zoom-in, zoom-out.
+FLOOR_MIN = 3.0              # seconds of one person's talk that earns a close-up
+SHOT_MIN = 2.5               # no shot, close-up or home, shorter than this
+CUT_LAG = 0.2                # picture follows the new voice by ~6 frames (J-cut)
+TAIL_HOLD = 0.35             # stay on a speaker a beat past their last word
+SAME_TURN_GAP = 0.6          # pauses this short inside one person's talk
+STEADY_SPREAD = 0.45         # of the crop: wander allowed before a close-up tracks
 
 # When one diarized speaker owns most of a two-person scene and the source also
 # gives one face more visual emphasis, make that person the main panel and keep
@@ -152,11 +165,8 @@ MOUTH_FPS = 7.0           # enough to see a mouth open and close; 7 samples a
 MOUTH_MIN = 0.055         # normalised frame difference below which a mouth is
                           # considered still (per 1/7s step).
 MOUTH_MARGIN = 1.45       # the active mouth must beat the other by this factor
-PUNCH_MIN = 2.4           # seconds a speaker must hold the floor before the
-                          # camera cuts to them
-PUNCH_PAD = 0.22          # lead/lag on each punch, so the cut lands before the
-                          # first syllable rather than on top of it
-PUNCH_MIN_GAP = 0.9       # don't cut to a single and straight back
+PUNCH_MIN = 2.4           # shortest lip-only speech span worth keeping; the
+                          # close-up itself needs FLOOR_MIN (see _speaker_cuts)
 CONVERSATION_MIN_SHARE = 0.12   # both participants need a real share before
                                 # the camera starts cutting between them
 MAX_ACTIVE_SECONDS = 240  # do not run the extra pass on very long clips; a
@@ -989,6 +999,126 @@ def _spoken_shares(tracks, spans):
     return shares
 
 
+def _turns(tracks, spans):
+    """Speech spans as (start, end, track index); spans no face owns are dropped."""
+    out = []
+    for s, e, cx in spans or []:
+        index = min(range(len(tracks)), key=lambda i: abs(
+            _track_mean_x(tracks[i]) - cx))
+        if abs(_track_mean_x(tracks[index]) - cx) <= 0.08:
+            out.append((s, e, index))
+    return out
+
+
+def _enforce_min_hold(shots):
+    """Fold every shot shorter than SHOT_MIN into a neighbour.
+
+    A flash of the home shot between two close-ups becomes the earlier speaker
+    held through the gap; a close-up too short to read stays on the home shot.
+    """
+    shots = [list(x) for x in shots if x[1] - x[0] > 1e-3]
+    while len(shots) > 1:
+        k = min(range(len(shots)), key=lambda j: shots[j][1] - shots[j][0])
+        cur = shots[k]
+        if cur[1] - cur[0] >= SHOT_MIN:
+            break
+        prev = shots[k - 1] if k > 0 else None
+        nxt = shots[k + 1] if k + 1 < len(shots) else None
+        if cur[2] is None and prev is not None and prev[2] is not None:
+            target = prev
+        elif cur[2] is not None and prev is not None and prev[2] is None:
+            target = prev
+        elif cur[2] is not None and nxt is not None and nxt[2] is None:
+            target = nxt
+        else:
+            target = prev or nxt
+        if target is prev:
+            prev[1] = cur[1]
+        else:
+            nxt[0] = cur[0]
+        del shots[k]
+        joined = [shots[0]]
+        for x in shots[1:]:
+            if x[2] == joined[-1][2]:
+                joined[-1][1] = x[1]
+            else:
+                joined.append(x)
+        shots = joined
+    return shots
+
+
+def _speaker_cuts(turns, start, end, hold=GROUP_HOLD_SECONDS):
+    """Who is on screen when: [(start, end, track index or None)] over the scene.
+
+    None is the home shot (the two-shot, or the wide of a panel). Only a turn of
+    FLOOR_MIN earns a close-up, so quick back-and-forth and one-word
+    interjections stay on the home shot instead of ping-ponging; a pause shorter
+    than `hold` keeps the last speaker on screen; and nothing is shorter than
+    SHOT_MIN.
+    """
+    joined = []
+    for s, e, index in sorted(turns):
+        if joined and joined[-1][2] == index and s - joined[-1][1] <= SAME_TURN_GAP:
+            joined[-1] = (joined[-1][0], max(joined[-1][1], e), index)
+        else:
+            joined.append((s, e, index))
+
+    shots = []
+    for s, e, index in joined:
+        if e - s < FLOOR_MIN:
+            continue
+        s, e = max(start, s + CUT_LAG), min(end, e + TAIL_HOLD)
+        if e <= s:
+            continue
+        if shots and shots[-1][2] == index and s - shots[-1][1] < hold:
+            shots[-1][1] = max(shots[-1][1], e)       # same person again: one shot
+            continue
+        if shots:
+            prev = shots[-1]
+            if s - prev[1] >= hold:
+                shots.append([prev[1], s, None])      # a long lull: back to home
+            else:
+                prev[1] = s                           # crosstalk or a short pause
+        elif s - start >= SHOT_MIN:
+            shots.append([start, s, None])
+        else:
+            s = start                                 # open on the speaker
+        shots.append([s, e, index])
+    if not shots:
+        return [(start, end, None)]
+    if end - shots[-1][1] >= hold:
+        shots.append([shots[-1][1], end, None])
+    else:
+        shots[-1][1] = end
+    return [tuple(x) for x in _enforce_min_hold(shots)]
+
+
+def _steady(tile, start, end):
+    """Lock a close-up off like a tripod shot while its subject sits still.
+
+    A seated speaker barely moves, and a crop that re-centres on every head turn
+    reads as someone fiddling with the camera. The shot holds the subject's
+    typical position; only real movement (an interquartile wander past
+    STEADY_SPREAD of the crop) keeps the smoothed tracking.
+    """
+    keys = tile.get("keys") or []
+    inside = [k for k in keys if start - 1e-6 <= k[0] <= end + 1e-6] or keys
+    if not inside:
+        return tile
+    xs = sorted(k[1] for k in inside)
+    ys = sorted(k[2] for k in inside)
+
+    def q(values, p):
+        return values[min(len(values) - 1, int(p * len(values)))]
+
+    win_w, win_h = tile.get("win", (0, 0))
+    if (q(xs, 0.75) - q(xs, 0.25) > win_w * STEADY_SPREAD
+            or q(ys, 0.75) - q(ys, 0.25) > win_h * STEADY_SPREAD):
+        return tile
+    x, y = xs[len(xs) // 2], ys[len(ys) // 2]
+    return {**tile, "keys": [(start, x, y), (end, x, y)]}
+
+
 def _punch_variants(tracks, regions, rects, mode, base, spans,
                     start, end, src_w, src_h, out_w, out_h):
     """Cut the camera to whoever is speaking, returning scenes or None.
@@ -997,64 +1127,37 @@ def _punch_variants(tracks, regions, rects, mode, base, spans,
     Holding a two-shot for forty seconds is not wrong so much as flat; the
     editors people compare against cut to the speaker. This returns the
     composition split into single-speaker scenes, or None to keep the base
-    layout untouched.
-
-    Deliberately conservative: both people must genuinely be talking, each
-    punch must clear PUNCH_MIN, and a stretch of speech too short to be its own
-    shot is left in the wide layout.
+    layout untouched. The switching rules are `_speaker_cuts`.
     """
     if not spans or len(tracks) < 2:
         return None
-
-    local = []
-    for s, e, cx in spans:
-        index = min(range(len(tracks)), key=lambda i: abs(
-            _track_mean_x(tracks[i]) - cx))
-        if abs(_track_mean_x(tracks[index]) - cx) > 0.08:
-            continue
-        s = max(start, s - PUNCH_PAD)
-        e = min(end, e + PUNCH_PAD)
-        if e - s >= PUNCH_MIN:
-            local.append((s, e, index))
-
-    if not local:
+    turns = _turns(tracks, spans)
+    if not turns:
         return None
 
     duration = max(end - start, 1e-3)
     shares = [0.0] * len(tracks)
-    for s, e, index in local:
-        shares[index] += (e - s)
+    for s, e, index in turns:
+        shares[index] += max(0.0, min(e, end) - max(s, start))
     if min(shares) / duration < CONVERSATION_MIN_SHARE:
         # One person owns the scene: that is a monologue with a listener, and
         # cutting away from the reaction shot is the wrong edit.
         return None
 
-    # Merge punches that overlap after padding. Two scenes with the same person
-    # and no gap between them are one scene.
-    merged = []
-    for s, e, index in sorted(local):
-        if merged and merged[-1][2] == index and s <= merged[-1][1] + 0.25:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], e), index)
-        else:
-            merged.append((s, e, index))
-
+    shots = _speaker_cuts(turns, start, end)
+    if all(index is None for _, _, index in shots):
+        return None
     scenes = []
-    cursor = start
-    for s, e, index in merged:
-        if s - cursor >= PUNCH_MIN_GAP:
-            scenes.append(_gap_scene(tracks, regions, rects, mode, cursor, s,
-                                      src_w, src_h, out_w, out_h))
+    for s, e, index in shots:
+        if index is None:
+            scenes.append(_gap_scene(tracks, regions, rects, mode, s, e,
+                                     src_w, src_h, out_w, out_h))
+            continue
         subject = tracks[index]
-        rect = (0.0, 0.0, 1.0, 1.0)
-        tile = tile_window(subject, rect, regions[id(subject)],
+        tile = tile_window(subject, (0.0, 0.0, 1.0, 1.0), regions[id(subject)],
                            src_w, src_h, out_w, out_h)
-        scenes.append({"start": s, "end": e, "mode": "single", "tiles": [tile]})
-        cursor = e
-
-    if end - cursor >= 0.6:
-        scenes.append(_gap_scene(tracks, regions, rects, mode, cursor, end,
-                                  src_w, src_h, out_w, out_h))
-
+        scenes.append({"start": s, "end": e, "mode": "single",
+                       "tiles": [_steady(tile, s, e)]})
     # A scene list that is still one piece is not worth the layout churn.
     if len(scenes) <= 1:
         return None
@@ -1085,19 +1188,24 @@ def tiles_clash(tiles):
 
 
 def _featured_scene(samples, start, end, src_w, src_h, out_w, out_h):
-    """A group moment with no clear speaker: frame its most prominent face.
+    """A group moment with no clear speaker: the panel's home shot.
 
-    The biggest face is who the shot is of -- the close-up camera in a
-    multi-feed layout, the person nearest the lens at a table. Only when every
-    face is small (a true wide of the whole table) is the group shown whole.
+    Decided from whole tracks, never per sample. Following the biggest face in
+    each half-second sample hopped between people whose faces are about the
+    same size, and every hop was a jump across the table. One face stands for
+    the shot only when it clearly dominates -- the close-up feed of a
+    multi-camera layout, someone right by the lens. Otherwise the group is
+    shown whole, which is also what an editor goes to for crosstalk.
     """
     inside = [x for x in samples if start <= x[0] <= end] or samples
-    points = primary_timeline(inside)
-    if points:
-        face_h = sum(p[4] for p in points) / len(points)
-        if face_h >= FEATURE_MIN_FACE:
-            return _speaker_single({"points": points}, start, end,
-                                   src_w, src_h, out_w, out_h)
+    tracks = sorted(build_tracks(inside), key=_track_area, reverse=True)
+    if tracks:
+        lead = tracks[0]
+        face_h = sum(p[4] for p in lead["points"]) / len(lead["points"])
+        dominant = (len(tracks) == 1 or _track_area(lead)
+                    >= FEATURE_DOMINANCE * _track_area(tracks[1]))
+        if face_h >= FEATURE_MIN_FACE and dominant:
+            return _speaker_single(lead, start, end, src_w, src_h, out_w, out_h)
     return _group_scene(start, end)
 
 
@@ -1123,7 +1231,8 @@ def _speaker_single(track, start, end, src_w, src_h, out_w, out_h):
     """
     tile = tile_window(track, (0.0, 0.0, 1.0, 1.0), (0.0, float(src_w)),
                        src_w, src_h, out_w, out_h)
-    return {"start": start, "end": end, "mode": "single", "tiles": [tile]}
+    return {"start": start, "end": end, "mode": "single",
+            "tiles": [_steady(tile, start, end)]}
 
 
 def _group_variants(tracks, samples, spans, start, end, src_w, src_h, out_w, out_h):
@@ -1132,62 +1241,28 @@ def _group_variants(tracks, samples, spans, start, end, src_w, src_h, out_w, out
     The two-person version (`_punch_variants`) demands that both people talk,
     which never holds for a panel of three or four. Here it is enough that the
     speaker shots cover a real share of the scene; everything between them is
-    the group shot.
+    the home shot -- ONE home shot for the whole scene, so going back to it
+    always looks the same.
     """
-    if not spans:
+    turns = _turns(tracks, spans)
+    if not turns:
         return None
-    local = []
-    for s, e, cx in spans:
-        index = min(range(len(tracks)),
-                    key=lambda i: abs(_track_mean_x(tracks[i]) - cx))
-        if abs(_track_mean_x(tracks[index]) - cx) > 0.08:
-            continue
-        s, e = max(start, s - PUNCH_PAD), min(end, e + PUNCH_PAD)
-        if e - s >= PUNCH_MIN:
-            local.append((s, e, index))
-    if not local:
-        return None
-    merged = []
-    for s, e, index in sorted(local):
-        if merged and merged[-1][2] == index and s <= merged[-1][1] + 0.25:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], e), index)
-        elif merged and s < merged[-1][1]:
-            # Overlapping speakers (crosstalk): the earlier shot ends where the
-            # next voice takes over, rather than two shots claiming one moment.
-            merged[-1] = (merged[-1][0], s, merged[-1][2])
-            merged.append((s, e, index))
-        else:
-            merged.append((s, e, index))
-    merged = [m for m in merged if m[1] - m[0] >= PUNCH_MIN]
-    covered = sum(e - s for s, e, _ in merged)
-    if not merged or covered / max(end - start, 1e-3) < GROUP_MIN_SPEECH:
+    shots = _speaker_cuts(turns, start, end)
+    covered = sum(e - s for s, e, index in shots if index is not None)
+    if not covered or covered / max(end - start, 1e-3) < GROUP_MIN_SPEECH:
         return None
 
-    # Between speakers the last one stays on screen, as a multicam editor
-    # holds a shot through a pause or a short interjection. Only a long
-    # stretch with no clear speaker goes to the group.
-    scenes, cursor = [], start
-    for s, e, index in merged:
-        gap = s - cursor
-        if not scenes:
-            if gap >= MIN_LAYOUT_SECONDS:
-                scenes.append(_featured_scene(samples, cursor, s,
-                                              src_w, src_h, out_w, out_h))
-            else:
-                s = cursor
-        elif gap >= GROUP_HOLD_SECONDS:
-            scenes.append(_featured_scene(samples, cursor, s,
-                                              src_w, src_h, out_w, out_h))
-        else:
-            scenes[-1]["end"] = s
-        scenes.append(_speaker_single(tracks[index], s, e,
-                                      src_w, src_h, out_w, out_h))
-        cursor = e
-    if end - cursor >= GROUP_HOLD_SECONDS:
-        scenes.append(_featured_scene(samples, cursor, end,
-                                      src_w, src_h, out_w, out_h))
-    else:
-        scenes[-1]["end"] = end
+    home, scenes = None, []
+    for s, e, index in shots:
+        if index is not None:
+            scenes.append(_speaker_single(tracks[index], s, e,
+                                          src_w, src_h, out_w, out_h))
+            continue
+        if home is None:
+            home = _featured_scene(samples, start, end, src_w, src_h, out_w, out_h)
+        # Copies: plan() re-times every tile's keys in place, once per scene.
+        scenes.append({**home, "start": s, "end": e,
+                       "tiles": [dict(t) for t in home["tiles"]]})
     return scenes
 
 
@@ -1517,6 +1592,11 @@ def _keyword_windows(words, keywords, title=""):
     return merged[:4]
 
 
+PUNCH_SCENE_MIN = 5.0      # only a hold this long gets a keyword punch-in
+PUNCH_EDGE = 1.2           # never this close to the shot's own cut
+PUNCH_SPACING = 6.0        # at most one punch-in per this many seconds
+
+
 def _zoom_scenes(scenes, windows, factor=0.90):
     """Split scenes around keyword windows, shrinking the crop for the window.
 
@@ -1524,36 +1604,34 @@ def _zoom_scenes(scenes, windows, factor=0.90):
     and the framing tightens for a beat, which is the way short-form editors use
     it. Shrinking the crop window is also the only version that costs nothing in
     quality -- the renderer already crops and scales every tile.
+
+    Used sparingly, because it is a reframe on top of every speaker cut. A
+    punch-in lands only inside a long hold, clear of that hold's own cuts, and
+    never within PUNCH_SPACING of the last one: a cut, a punch and a cut back a
+    second apart is exactly the zoom-in, zoom-out the edit must not have.
     """
     if not windows:
         return scenes
-    out = []
+    out, last_punch = [], float("-inf")
     for scene in scenes:
         s0, s1 = scene["start"], scene["end"]
-        cuts = [(max(s0, a), min(s1, b)) for a, b in windows
-                if a < s1 and b > s0]
-        cuts = [(a, b) for a, b in cuts if b - a >= 0.45]
+        cuts = []
+        if scene.get("tiles") and s1 - s0 >= PUNCH_SCENE_MIN:
+            for a, b in sorted(windows):
+                a, b = max(a, s0 + PUNCH_EDGE), min(b, s1 - PUNCH_EDGE)
+                if b - a >= 0.45 and a - last_punch >= PUNCH_SPACING:
+                    cuts.append((a, b))
+                    last_punch = b
         if not cuts:
             out.append(scene)
             continue
         cursor = s0
-        for a, b in sorted(cuts):
-            a, b = max(a, cursor), min(b, s1)
-            if b - a < 0.45:
-                continue
-            # A 0.2s strip of the wide shot before a punch-in is a five-frame
-            # flash, not a shot. Absorb gaps under half a second into the zoom.
-            if a - cursor < 0.5:
-                a = cursor
-            else:
-                out.append(_scene_segment(scene, cursor, a, 1.0))
+        for a, b in cuts:
+            out.append(_scene_segment(scene, cursor, a, 1.0))
             out.append(_scene_segment(scene, a, b, factor))
             cursor = b
-        if s1 - cursor >= 0.5:
-            out.append(_scene_segment(scene, cursor, s1, 1.0))
-        elif cursor < s1 and out and out[-1].get("zoom"):
-            out[-1]["end"] = round(s1, 3)
-    return out or scenes
+        out.append(_scene_segment(scene, cursor, s1, 1.0))
+    return out
 
 
 def _scene_segment(scene, start, end, factor):
@@ -1643,6 +1721,44 @@ def _merge_short_runs(runs, samples, cuts):
     return joined
 
 
+def _whole_shots(runs, samples, cuts):
+    """One composition per camera shot when the shot is plainly a conversation.
+
+    Face counts flicker inside a shot -- heads turn into profile, a hand covers
+    a face -- and each flicker long enough to survive `_merge_short_runs` used
+    to become a new layout of the same unmoving camera: a two-shot, then the
+    whole table, then a close-up. That is the zoom-in, zoom-out churn. The
+    people at a table do not change between samples, so a shot whose
+    persistent tracks show two or more people is composed once, and only who
+    is speaking moves the edit. A shot that is mostly one face is left alone:
+    that is more likely a close-up the cut detector missed.
+    """
+    if len(runs) <= 1:
+        return runs
+    out, shot = [], [runs[0]]
+
+    def flush():
+        first, last = shot[0][0], shot[-1][1]
+        if len(shot) > 1:
+            part = samples[first:last]
+            people = min(len(build_tracks(part)), MAX_PEOPLE)
+            lone = sum(1 for _, faces in part if len(faces) <= 1) / max(1, len(part))
+            if (people >= 3 and lone < 0.25) or (people == 2 and lone < 0.5):
+                out.append((first, last, people))
+                return
+        out.extend(shot)
+
+    for run in runs[1:]:
+        lo, hi = samples[shot[-1][1] - 1][0], samples[run[0]][0]
+        if any(lo < c <= hi for c in cuts):
+            flush()
+            shot = [run]
+        else:
+            shot.append(run)
+    flush()
+    return out
+
+
 def plan(video_path, start, end, out_w, out_h, speaker_words=None,
          src_size=None, samples=None, zoom_windows=None):
     """Work out how this clip should be framed.
@@ -1701,6 +1817,7 @@ def plan(video_path, start, end, out_w, out_h, speaker_words=None,
     scenes = []
     runs = _merge_short_runs(_split_runs_at_cuts(_runs(counts), samples, source_cuts),
                              samples, source_cuts)
+    runs = _whole_shots(runs, samples, source_cuts)
 
     def boundary(i):
         """Where the shot changes between sample i-1 and sample i."""

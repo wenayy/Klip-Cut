@@ -23,6 +23,7 @@ find, and nobody gets the expensive render for free.
 
 from app import env  # noqa: F401  -- ensures .env is loaded before ADMIN_EMAILS
 
+import math
 import os
 from datetime import datetime, timezone
 
@@ -298,6 +299,44 @@ def credits_for_job(n_clips: int, high_quality: bool = False,
     if advanced_model:
         total += ADVANCED_MODEL_PER_JOB
     return total
+
+
+# A highlight video is ONE deliverable whose cost grows with its length, so it
+# is priced per finished minute rather than per clip: a minute of highlight is
+# cheaper than a clip (no per-clip framing pass, title card or music bed), and
+# a 10-minute highlight lands near the price of five clips.
+HIGHLIGHT_CREDITS_PER_MINUTE = 5
+HIGH_QUALITY_PER_HIGHLIGHT_MINUTE = 2
+
+
+def credits_for_highlight(seconds: float, high_quality: bool = False,
+                          advanced_model: bool = False) -> int:
+    """Total credits for a highlight video of about `seconds`."""
+    minutes = max(1, math.ceil(max(0.0, float(seconds or 0)) / 60))
+    total = HIGHLIGHT_CREDITS_PER_MINUTE * minutes
+    if high_quality:
+        total += HIGH_QUALITY_PER_HIGHLIGHT_MINUTE * minutes
+    if advanced_model:
+        total += ADVANCED_MODEL_PER_JOB
+    return total
+
+
+def highlight_breakdown(seconds: float, high_quality: bool = False,
+                        advanced_model: bool = False) -> dict:
+    """The highlight price, itemised for the review step (see cost_breakdown)."""
+    minutes = max(1, math.ceil(max(0.0, float(seconds or 0)) / 60))
+    lines = [{"label": f"Highlight video, about {minutes} min",
+              "detail": f"{HIGHLIGHT_CREDITS_PER_MINUTE} credits per minute",
+              "credits": HIGHLIGHT_CREDITS_PER_MINUTE * minutes}]
+    if high_quality:
+        lines.append({"label": "High quality",
+                      "detail": f"{HIGH_QUALITY_PER_HIGHLIGHT_MINUTE} credits per minute",
+                      "credits": HIGH_QUALITY_PER_HIGHLIGHT_MINUTE * minutes})
+    if advanced_model:
+        lines.append({"label": "Advanced model", "detail": "charged once per job",
+                      "credits": ADVANCED_MODEL_PER_JOB})
+    return {"lines": lines,
+            "total": credits_for_highlight(seconds, high_quality, advanced_model)}
 
 
 def cost_breakdown(n_clips: int, high_quality: bool = False,

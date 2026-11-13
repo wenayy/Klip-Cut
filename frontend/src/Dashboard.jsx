@@ -36,6 +36,11 @@ function expiresIn(iso, now) {
   return `Expires in ${Math.ceil(hours / 24)}d`;
 }
 
+function minutes(seconds) {
+  const m = Math.round((seconds || 0) / 60);
+  return m >= 1 ? `${m} min` : `${Math.round(seconds || 0)}s`;
+}
+
 /**
  * Signed-in home: credit balance, top-ups, and every past job.
  *
@@ -192,10 +197,12 @@ export default function Dashboard({ user, onOpenJob, onClose, onUpgrade }) {
 
                 <span className="job-main">
                   <span className="job-title">
-                    {job.clips?.[0]?.title || sourceLabel(job.url)}
+                    {job.clips?.[0]?.title || job.options?.source_title || sourceLabel(job.url)}
                   </span>
                   <span className="job-meta">
-                    {job.status === "done"
+                    {job.status === "done" && job.options?.output === "highlight"
+                      ? `Highlight video · ${minutes(job.options.highlight?.duration)} · ${expiresIn(job.expires_at, clock)}`
+                      : job.status === "done"
                       ? `${job.clips.length} clip${job.clips.length === 1 ? "" : "s"} · ${expiresIn(job.expires_at, clock)}`
                       : job.status === "expired"
                       ? "Expired · Re-run this video to make fresh clips"
@@ -218,6 +225,13 @@ export default function Dashboard({ user, onOpenJob, onClose, onUpgrade }) {
                   >
                     Upgrade to keep for 3 days
                   </button>
+                )}
+
+                {job.status === "done" && job.options?.highlight?.file && (
+                  <span className="job-thumbs wide">
+                    <video src={clipUrl(job.id, job.options.highlight.file)}
+                           muted preload="metadata" aria-hidden="true" />
+                  </span>
                 )}
 
                 {job.status === "done" && job.clips?.length > 0 && (
