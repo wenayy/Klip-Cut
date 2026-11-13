@@ -70,8 +70,8 @@ GRADE = ("eq=contrast=1.08:saturation=1.14:gamma=0.98,"
          "colorbalance=rs=0.03:bs=-0.03:rh=0.02:bh=-0.02,"
          "noise=alls=5:allf=t")
 JUMP = 0.12                      # held punch-in between sentence breaks
-JUMP_MIN_GAP = 5.0               # at most one framing change per this many seconds
-JUMP_MAX_GAP = 9.0               # a talking shot never holds one framing longer
+JUMP_MIN_GAP = 3.5               # reference vlog edits cut a framing every ~3-4 s
+JUMP_MAX_GAP = 6.0               # a talking shot never holds one framing longer
 SECTION_SECONDS = 3.0            # how long a moment's lower-third title stays
 SNAP_GAP = 0.25                  # a pause this long is a safe place to cut
 TAIL_PAD = 0.12
