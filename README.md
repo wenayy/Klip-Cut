@@ -18,7 +18,7 @@ AI-powered platform that turns long-form videos into short, viral-ready clips wi
 3. **Frames each clip for what it actually is** — the **Auto** template inspects the footage and picks a treatment per clip: podcast / talking head (face-tracked, speaker-aware), gameplay with a webcam, gameplay with no facecam (action-tracked), or screencast. The manual templates remain as overrides.
 4. **Edit in the browser** — trim, restyle captions, change layouts, add overlays, adjust pacing — all with a live preview that matches the final export
 5. **Export** — renders polished vertical clips ready for social media
-6. **Or make a highlight video** — instead of clips, pick *Highlight video*: the best moments from across the whole source fill a time budget, then play in the order they happened, opened by a cold-open teaser, joined with quick transitions, optional meme beats and "25 MIN LATER" tags. Copy-ready YouTube chapters come with it.
+6. **Or make a highlight video** — instead of clips, pick *Highlight video*: the best moments from across the whole source fill a time budget, then play in the order they happened. Cold-open teaser with a riser, tight cuts, punch-ins, impact/riser/pop sound design, meme beats, "25 MIN LATER" tags (full-screen after very long skips), a light grade and optional ducked music. Copy-ready YouTube chapters come with it.
 
 ### Podcasts
 

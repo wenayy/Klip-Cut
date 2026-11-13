@@ -34,8 +34,12 @@ def _library(genre: str) -> list:
     folder = os.path.join(MUSIC_DIR, genre)
     if not os.path.isdir(folder):
         return []
-    return sorted(os.path.join(folder, f) for f in os.listdir(folder)
-                  if f.lower().endswith(TRACK_EXTENSIONS))
+    tracks = sorted(os.path.join(folder, f) for f in os.listdir(folder)
+                    if f.lower().endswith(TRACK_EXTENSIONS))
+    # The generated highlight_* beds are a fallback: any real track dropped in
+    # the folder replaces them instead of rotating with them.
+    real = [t for t in tracks if not os.path.basename(t).startswith("highlight_")]
+    return real or tracks
 
 
 def path_for(genre: str = "", title: str = "", variant: int = 0) -> str | None:

@@ -2388,7 +2388,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
             target = highlight.target_seconds(source_seconds, req.highlight_minutes)
             update_job(job_id, progress_message="Finding the best parts of the whole video...",
                        percent=0)
-            want_moments = max(8, int(target / 30) * 2)
+            want_moments = max(12, int(target / 20))
             if silent_footage or action_first:
                 pool = content.highlight_moments(
                     video_path, source_seconds, want_moments,

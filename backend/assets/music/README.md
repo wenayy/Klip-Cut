@@ -16,10 +16,14 @@ they set a floor without competing with speech. Regenerate with:
 cd backend && ./venv/bin/python tools/make_music.py
 ```
 
+The `gaming/`, `podcast/` and `general/` folders contain **three-minute
+extended versions** of the generated beds, used for long-form highlight videos
+where an 8–12 second loop would be obvious. They are still original synthesis.
+
 ## Using real tracks
 
 Drop royalty-free tracks you have the rights to into `gaming/`, `podcast/` or
-`general/` (mp3, wav, m4a, aac, ogg, flac). They replace the generated loops
-for that genre and rotate across the clips in a job. `general/` is the fallback
-for any genre with an empty folder. The bed is still ducked under speech and
-faded at both ends automatically.
+`general/` (mp3, wav, m4a, aac, ogg, flac). They take priority over both the
+loops and the extended beds, and rotate across the clips in a job. `general/`
+is the fallback for any genre with an empty folder. The bed is still ducked
+under speech and faded at both ends automatically.

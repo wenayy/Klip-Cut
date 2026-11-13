@@ -962,7 +962,7 @@ def _diversify(utterances, chosen, pool, n_clips):
 # budget, not a count, decides how many survive (see highlight.select_segments).
 HIGHLIGHT_GUIDANCE = (
     "this is for a HIGHLIGHT VIDEO of the whole recording, not a short. "
-    "Nominate COMPLETE segments of roughly 20 to 150 seconds -- the parts "
+    "Nominate COMPLETE segments of roughly 12 to 75 seconds -- the parts "
     "someone who missed it must see: the key stories, reveals, decisions and "
     "arguments, the funniest exchanges, the biggest reactions, and how it "
     "ends. Each must make sense on its own with its setup included. Skip "

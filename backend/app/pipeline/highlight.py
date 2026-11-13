@@ -40,20 +40,24 @@ MAX_TARGET = 15 * 60
 LENGTH_CHOICES = (5, 10, 15)     # minutes offered besides auto
 
 # --- selection ---------------------------------------------------------------
-SEGMENT_MIN = 10.0               # YouTube ignores chapters under 10 s
-SEGMENT_MAX = 180.0
+SEGMENT_MIN = 10.0              # YouTube ignores chapters under 10 s
+# Highlight editors cut far tighter than a clip picker: a 12-minute reel made of
+# nine two-minute blocks feels like a playlist, not an edit. Cap the material
+# and let the budget pick more parts.
+SEGMENT_MAX = 75.0
 SEGMENT_GAP = 2.0                # picks closer than this would play as one
 BUCKET_SECONDS = 600             # one stretch of the video per ten minutes
 COVERAGE_PERCENTILE = 0.3        # a stretch's best below this is skipped
 
 # --- assembly ----------------------------------------------------------------
 TEASER_SECONDS = 7.0
-FADE = 0.5                       # between two segments
+FADE = 0.2                       # between two segments; quick, not a scene change
 MEME_FADE = 0.12                 # white flash into, quick fade out of, a meme
 MEME_SECONDS = 1.4
 MAX_MEMES = 4
 MEME_EVERY = 3                   # at most one meme per this many segments
 LATER_MIN_SECONDS = 300          # a skip this long is worth a tag
+CARD_MIN_SECONDS = 900           # a skip this long gets a full-screen card
 FPS = 30
 WHOOSH_GAIN = 0.25
 TITLE_SHARE = 0.075              # title card height, of the frame
@@ -66,16 +70,20 @@ TAIL_PAD = 0.12
 
 # Long-form transitions: quick and quiet. The flashy set suits a 50 s reel; in
 # a 12-minute video a wipe every minute reads as a gimmick.
-TRANSITIONS = ("fade", "smoothleft", "fadeblack", "smoothright", "circleopen",
-               "slideup")
+TRANSITIONS = ("fade", "fade", "smoothleft", "fade", "fadeblack", "fade")
+# Gameplay tolerates a little more motion; a podcast should not wipe every cut.
+GAMING_TRANSITIONS = ("fade", "zoomin", "slideleft", "fade", "circleopen", "fade")
 
 REACTIONS = {
     "gaming": [("NO WAY", "😱"), ("CLUTCH", "🔥"), ("BRUH", "💀"),
-               ("WHAT?!", "🤯"), ("GG", "🏆")],
+               ("WHAT?!", "🤯"), ("GG", "🏆"), ("COOKED", "🍳"),
+               ("AURA +100", "✨")],
     "podcast": [("WAIT WHAT", "🤯"), ("FACTS", "💯"), ("SAY THAT AGAIN", "👀"),
-                ("BRUH", "💀"), ("NO WAY", "😱")],
+                ("BRUH", "💀"), ("NO WAY", "😱"), ("HE COOKED", "🍳"),
+                ("REAL TALK", "🗣️")],
     "general": [("NO WAY", "😱"), ("WAIT WHAT", "🤯"), ("BRUH", "💀"),
-                ("FACTS", "💯"), ("LMAO", "😂")],
+                ("FACTS", "💯"), ("LMAO", "😂"), ("COOKED", "🍳"),
+                ("REAL", "👀")],
 }
 
 
@@ -165,6 +173,7 @@ def timeline(parts: list, genre: str = "general", memes: bool = True) -> list:
     reactions = REACTIONS.get(genre) or REACTIONS["general"]
     segments = [p for p in parts if p["kind"] == "segment"]
     slots = meme_slots([s.get("score", 0) for s in segments]) if memes else set()
+    choices = GAMING_TRANSITIONS if (genre or "").lower() == "gaming" else TRANSITIONS
     out, seen, used = [], -1, 0
     for i, part in enumerate(parts):
         out.append(dict(part))
@@ -190,7 +199,7 @@ def timeline(parts: list, genre: str = "general", memes: bool = True) -> list:
         elif prev["kind"] == "teaser":
             transition, fade = "fadeblack", FADE         # a breath after the cold open
         else:
-            transition, fade = TRANSITIONS[rotation % len(TRANSITIONS)], FADE
+            transition, fade = choices[rotation % len(choices)], FADE
             rotation += 1
         fade = min(fade, seg["duration"] / 3, prev["duration"] / 3)
         seg.update(transition=transition, fade=round(fade, 3),
@@ -288,8 +297,11 @@ def join_graph(segments: list, audio_inputs: dict, width: int, height: int,
                whoosh_input: int = None, font: str = None,
                title_file: str = None, title_at: float = 0.0, title_px: int = 0,
                tag_files: dict = None, section_files: dict = None,
-               eyebrow_file: str = None, music_input: int = None,
-               music_gain: float = 0.1) -> str:
+               eyebrow_file: str = None, card_files: dict = None,
+               music_input: int = None,
+               music_gain: float = 0.1, impact_input: int = None,
+               impact_times: list = None, riser_input: int = None,
+               pop_input: int = None, pop_times: list = None) -> str:
     """filter_complex joining inputs 0..n-1 (one per segment) into [vout][aout].
 
     Every input is normalised first -- frame rate, size, timebase, audio format
@@ -357,6 +369,35 @@ def join_graph(segments: list, audio_inputs: dict, width: int, height: int,
                      f":duration=first:normalize=0[amixed]")
         a = "[amixed]"
 
+    def add_cues(input_index, times, gain, dur, prefix):
+        """Mix one-shot SFX at output times under the current audio bed."""
+        nonlocal a
+        if input_index is None or not times:
+            return
+        times = [max(0.0, float(t)) for t in times]
+        if len(times) == 1:
+            split = f"[{prefix}s0]"
+        else:
+            split = "".join(f"[{prefix}s{i}]" for i in range(len(times)))
+            split = f",asplit={len(times)}{split}"
+        parts.append(
+            f"[{input_index}:a]aresample=48000,"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"atrim=0:{dur:.3f},volume={gain:.2f}{split}"
+        )
+        labels = []
+        for i, at in enumerate(times):
+            ms = int(at * 1000)
+            parts.append(f"[{prefix}s{i}]adelay={ms}|{ms}[{prefix}d{i}]")
+            labels.append(f"[{prefix}d{i}]")
+        parts.append(f"{a}{''.join(labels)}amix=inputs={len(labels) + 1}"
+                     f":duration=first:normalize=0[{prefix}mix]")
+        a = f"[{prefix}mix]"
+
+    add_cues(impact_input, impact_times, 0.50, 0.42, "imp")
+    add_cues(riser_input, [0.0] if riser_input is not None else [], 0.38, 0.90, "ris")
+    add_cues(pop_input, pop_times, 0.22, 0.12, "pop")
+
     total = total_duration(segments)
     if music_input is not None:
         # A bed under the whole video, ducked whenever someone talks -- the
@@ -373,6 +414,11 @@ def join_graph(segments: list, audio_inputs: dict, width: int, height: int,
                  f"afade=t=in:st=0:d=0.04,"
                  f"afade=t=out:st={max(0.0, total - 0.4):.3f}:d=0.4[aout]")
 
+    # A light grade across the whole reel. It is not a LUT; it makes the
+    # segments, which come from different renders, sit closer together.
+    parts.append(f"{v}eq=contrast=1.04:saturation=1.06[vgrade]")
+    v = "[vgrade]"
+
     draws = []
     if font and title_file:
         draws.append(_drawtext(font, title_file, title_px or title_size("", width, height),
@@ -382,6 +428,10 @@ def join_graph(segments: list, audio_inputs: dict, width: int, height: int,
                                    title_at + 0.2, title_at + 3.4, "h*0.045", box=0.0,
                                    colour="0x8B5CF6"))
     if font:
+        for k, path in sorted((card_files or {}).items()):
+            t0 = (segments[k]["offset"] or 0.0) + segments[k]["fade"] + 0.2
+            draws += _context_card(font, path, max(40, int(height * 0.072)),
+                                   t0, t0 + 1.0, width, height)
         for k, path in sorted((section_files or {}).items()):
             t0 = (segments[k]["offset"] or 0.0) + segments[k]["fade"] + 0.4
             if k == next((i for i, s in enumerate(segments) if s["kind"] == "segment"), -1):
@@ -474,6 +524,23 @@ def _motion(seg: dict, width: int, height: int) -> str:
         z += f"+{PUNCH}*exp(-pow((t-{seg['punch']:.2f})/0.3,2))"
     return (f"scale=w='2*trunc(iw*({z})/2)':h='2*trunc(ih*({z})/2)':eval=frame,"
             f"crop={width}:{height},")
+
+
+def _context_card(font: str, text_file: str, size: int, t0: float, t1: float,
+                  width: int, height: int) -> list:
+    """A full-frame "25 MIN LATER" card at a long skip."""
+    on = f"between(t,{t0:.2f},{t1:.2f})"
+    alpha = (f"if(lt(t,{t0 + 0.18:.2f}),(t-{t0:.2f})/0.18,"
+             f"if(gt(t,{t1 - 0.18:.2f}),({t1:.2f}-t)/0.18,1))")
+    return [
+        f"drawbox=x=0:y=0:w=iw:h=ih:color=black@0.78:t=fill:enable='{on}'",
+        f"drawbox=x=0:y=(h-{size * 2})/2:w={max(8, size // 5)}:h={size * 2}"
+        f":color=0x8B5CF6@1:t=fill:enable='{on}'",
+        f"drawtext=fontfile='{render._ff_escape(font)}':textfile='{render._ff_escape(text_file)}'"
+        f":fontsize={size}:fontcolor=white:borderw={max(4, size // 12)}"
+        f":bordercolor=black:x=(w-text_w)/2:y=(h-text_h)/2"
+        f":enable='{on}':alpha='{alpha}'",
+    ]
 
 
 def _lower_third(font: str, text_file: str, size: int, t0: float, t1: float,
@@ -656,6 +723,35 @@ def build(job_dir: str, segments: list, width: int, height: int,
         whoosh_input = count
         inputs += ["-i", whoosh]
         count += 1
+
+    # Sound design: a hit on every planned punch-in and meme, a riser into the
+    # cold open, a tiny pop on each lower-third. The whoosh still marks joins.
+    impact = _sfx("impact.wav")
+    riser = _sfx("riser.wav")
+    pop = _sfx("pop.wav")
+    impact_input = riser_input = pop_input = None
+    if impact:
+        impact_input = count
+        inputs += ["-i", impact]
+        count += 1
+    if riser:
+        riser_input = count
+        inputs += ["-i", riser]
+        count += 1
+    if pop:
+        pop_input = count
+        inputs += ["-i", pop]
+        count += 1
+
+    impact_times = []
+    for seg in plan:
+        start = 0.0 if seg.get("offset") is None else seg["offset"] + seg["fade"]
+        if seg.get("punch") is not None:
+            impact_times.append(round(start + seg["punch"], 3))
+        if seg["kind"] == "meme":
+            impact_times.append(round(start + 0.03, 3))
+    impact_times = sorted({t for t in impact_times if t < total_duration(plan) - 0.1})
+
     music_input = None
     if music_path and os.path.exists(music_path):
         music_input = count
@@ -672,20 +768,33 @@ def build(job_dir: str, segments: list, width: int, height: int,
     first = next((k for k, s in enumerate(plan) if s["kind"] == "segment"), 0)
     title_at = 0.0 if plan[first]["offset"] is None else plan[first]["offset"] + plan[first]["fade"]
 
-    tag_files = {}
+    tag_files, card_files = {}, {}
     if tags:
         for k, text in context_tags(plan).items():
             path = os.path.join(job_dir, f"{WORK_PREFIX}tag_{k}.txt")
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(text)
             tag_files[k] = path
+        previous_end = None
+        for k, seg in enumerate(plan):
+            if seg["kind"] != "segment":
+                continue
+            if previous_end is not None and \
+                    seg["source_start"] - previous_end >= CARD_MIN_SECONDS:
+                text = context_tags(plan).get(k)
+                if text:
+                    path = os.path.join(job_dir, f"{WORK_PREFIX}card_{k}.txt")
+                    with open(path, "w", encoding="utf-8") as handle:
+                        handle.write(text)
+                    card_files[k] = path
+            previous_end = seg["source_end"]
 
     eyebrow_file = None
     if title_file:
         eyebrow_file = os.path.join(job_dir, f"{WORK_PREFIX}eyebrow.txt")
         with open(eyebrow_file, "w", encoding="utf-8") as handle:
             handle.write("HIGHLIGHTS")
-    section_files = {}
+    section_files, pop_times = {}, []
     for k, seg in enumerate(plan):
         name = " ".join((seg.get("title") or "").split())
         if seg["kind"] == "segment" and name and seg["duration"] >= 8:
@@ -695,11 +804,20 @@ def build(job_dir: str, segments: list, width: int, height: int,
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(name)
             section_files[k] = path
+            t0 = (seg["offset"] or 0.0) + seg["fade"] + 0.4
+            if k == next((i for i, s in enumerate(plan) if s["kind"] == "segment"), -1):
+                t0 += 3.6
+            pop_times.append(round(t0, 3))
 
     graph = join_graph(plan, audio_inputs, width, height, whoosh_input, font,
                        title_file, title_at,
                        title_size(shown, width, height, share=TITLE_SHARE) if shown else 0,
-                       tag_files, section_files, eyebrow_file, music_input, music_gain)
+                       tag_files, section_files, eyebrow_file, card_files,
+                       music_input, music_gain,
+                       impact_input=impact_input, impact_times=impact_times,
+                       riser_input=(riser_input if plan and plan[0]["kind"] == "teaser"
+                                    else None),
+                       pop_input=pop_input, pop_times=pop_times)
     out_path = os.path.join(job_dir, HIGHLIGHT_FILE)
     _run("highlight video", [
         "ffmpeg", "-y", *inputs, "-filter_complex", graph,

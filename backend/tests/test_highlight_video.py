@@ -145,3 +145,30 @@ def test_landscape_captions_sit_low():
     from app.pipeline import render
     assert render.caption_margin_v(1280, 720, 1920, 1080) == int(1080 * 0.08)
     assert render.caption_margin_v(1280, 720, 1080, 1920) > 1920 * 0.2   # vertical unchanged
+
+
+def test_highlight_uses_impact_riser_pop_and_a_light_grade():
+    plan = highlight.timeline(_parts(2), memes=False)
+    graph = highlight.join_graph(
+        plan, {}, 1920, 1080, impact_input=5, impact_times=[1.0, 2.0],
+        riser_input=6, pop_input=7, pop_times=[1.5])
+    assert "asplit=2[imps0][imps1]" in graph
+    assert "volume=0.50" in graph and "volume=0.38" in graph and "volume=0.22" in graph
+    assert "[impmix]" in graph and "[rismix]" in graph and "[popmix]" in graph
+    assert "eq=contrast=1.04:saturation=1.06" in graph
+
+
+def test_long_skip_gets_a_full_frame_context_card():
+    plan = highlight.timeline([{**_parts(1)[0], "source_start": 0, "source_end": 10},
+                               {**_parts(1)[0], "source_start": 1200,
+                                "source_end": 1210}], memes=False)
+    import os, tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+        fh.write("20 MIN LATER")
+        path = fh.name
+    try:
+        graph = highlight.join_graph(plan, {}, 1920, 1080, font="font.ttf",
+                                     card_files={1: path})
+        assert "color=black@0.78" in graph and "textfile=" in graph
+    finally:
+        os.unlink(path)
