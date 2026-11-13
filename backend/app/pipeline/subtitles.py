@@ -240,7 +240,14 @@ def _covers_devanagari(family: str) -> bool:
 
 
 def _romanize(text: str) -> str:
-    """Transliterate non-Latin text (Devanagari, etc.) to ASCII Roman script."""
+    """Devanagari as Roman Hinglish; any other non-Latin script as ASCII.
+
+    unidecode alone spelled Hindi the way no one types it ("zabaradast",
+    "nhiin"), so Devanagari goes through the Hinglish romaniser and unidecode
+    only handles what is left.
+    """
+    from app.pipeline import hinglish
+    text = hinglish.romanize_text(text) if _is_devanagari(text) else text
     try:
         from unidecode import unidecode
         return unidecode(text)
@@ -401,6 +408,40 @@ POSITIONS = {
 }
 
 COLOR_OUTLINE = "&H00000000"    # black
+GLOW_STYLE = "CaptionGlow"
+GLOW_SPREAD = 9                 # px the halo's stroke extends past the outline
+GLOW_BLUR = 12
+
+
+CHIP_STYLE = "CaptionChip"
+
+
+def _has_glow(st: dict) -> bool:
+    """A halo needs outlined text: on a boxed preset it would blur the plate."""
+    return bool(st.get("glow")) and st.get("box", "none") == "none"
+
+
+def _has_chip_layer(st: dict) -> bool:
+    """Whether the word chip is drawn on its own layer, under outlined text.
+
+    A box style (BorderStyle 3) cannot also stroke its glyphs, so the classic
+    chip presets show bare, unoutlined text for every word that is not being
+    spoken -- fine on a dark plate, unreadable over a bright frame. A preset
+    that sets `text_outline` gets the chip and the text as two layers instead.
+    """
+    return st.get("box") == "word" and st.get("text_outline") is not None
+
+
+def _preset_style(style: str) -> dict:
+    """A preset by name, with its shipped typeface resolved to a family.
+
+    Presets name a font FILE by slug (`font_id`) so the editor can preview the
+    same face; libass wants the family. If the file is not installed the
+    preset's raw `font` stands, exactly as before presets could name one.
+    """
+    st = STYLES.get(style, STYLES["classic"])
+    family = resolve_font(st.get("font_id"))
+    return {**st, "font": family} if family else st
 BOX_TRANSPARENT = "&HFF000000"  # alpha FF = fully transparent box
 
 PLAY_RES_X = 1080
@@ -525,32 +566,54 @@ def group_words(words: list, max_words: int = None) -> list:
 GRADIENT_RAMP = ["&H00F04080", "&H00E060D0", "&H00D080F0", "&H00F0D060"]
 
 
-def _active_override(st: dict, word_index: int = 0) -> str:
-    """The override block that marks the spoken word, minus the braces."""
+def _scale_tags(percent: float) -> str:
+    r"""\fscx/\fscy for a size, or nothing at the style's own 100%."""
+    pct = int(round(percent))
+    return "" if pct == 100 else f"\\fscx{pct}\\fscy{pct}"
+
+
+def _active_override(st: dict, word_index: int = 0, factor: float = 1.0) -> str:
+    """The override block that marks the spoken word, minus the braces.
+
+    `factor` is the word's resting size as a fraction of the style size. Every
+    scale below is absolute in ASS, so a word that rests at 58% (the top line of
+    a stack) has to have its pop computed from 58, not from 100 -- otherwise
+    being spoken would also blow it up to full size.
+    """
     effect = st.get("active_effect", "color")
     active = st["active"]
     scale = st.get("active_scale", 100)
 
+    def pct(value):
+        return int(round(value * factor))
+
     if effect == "gradient":
         colour = GRADIENT_RAMP[word_index % len(GRADIENT_RAMP)]
-        return f"\\c{colour}&"
+        return f"\\c{colour}&" + _scale_tags(100 * factor)
 
     tags = f"\\c{active}&"
 
     if effect == "scale" or (effect == "color" and scale != 100):
         s = scale if scale != 100 else 115
-        tags += f"\\fscx{s}\\fscy{s}"
+        tags += f"\\fscx{pct(s)}\\fscy{pct(s)}"
     elif effect == "pop":
         # Overshoot then settle. Two \t segments rather than one, because a
         # single interpolation to the final size reads as a slow grow, not a pop.
-        tags += "\\fscx88\\fscy88\\t(0,70,\\fscx118\\fscy118)\\t(70,150,\\fscx104\\fscy104)"
-    elif effect == "underline":
+        tags += (f"\\fscx{pct(88)}\\fscy{pct(88)}"
+                 f"\\t(0,70,\\fscx{pct(118)}\\fscy{pct(118)})"
+                 f"\\t(70,150,\\fscx{pct(104)}\\fscy{pct(104)})")
+    else:
+        tags += _scale_tags(100 * factor)
+
+    if effect == "underline":
         tags += "\\u1"
     elif effect == "glow":
         # A blurred outline in the accent colour IS the glow -- libass has no
         # separate shadow-colour blur. Needs BorderStyle 1, which every glow
         # preset has (box="none"), or the blur would fill a solid plate instead.
-        tags += f"\\3c{active}&\\3a&H40&\\bord{st.get('outline', 5) + 7}\\blur7"
+        # Restrained on purpose. A wide blur at this canvas size reads as a
+        # coloured cloud around the word rather than as light.
+        tags += f"\\3c{active}&\\3a&H50&\\bord{st.get('outline', 5) + 4}\\blur4"
     elif effect == "marker":
         # Turn the transparent base box opaque for this word only.
         chip = st.get("box_color") or active
@@ -571,8 +634,20 @@ def _header(margin_v: int, st: dict, play_res: tuple,
         margin_v = int(res_y * pos["margin_frac"])
 
     box = st.get("box", "none")
-    if box == "none":
-        border_style, outline_colour = 1, COLOR_OUTLINE
+    outline_width = st["outline"]
+    chip_style = ""
+    if box == "none" or _has_chip_layer(st):
+        border_style = 1
+        outline_colour = st.get("outline_color") or COLOR_OUTLINE
+        if _has_chip_layer(st):
+            # Text keeps a real stroke; the chip moves to the layer below, where
+            # `outline` is its padding and only the spoken word turns it opaque.
+            outline_width = st["text_outline"]
+            chip_style = (
+                f"\nStyle: {CHIP_STYLE},{st['font']},{st['size']},&HFF000000,"
+                f"&HFF000000,{BOX_TRANSPARENT},&HFF000000,-1,0,0,0,100,100,"
+                f"{st.get('spacing', 0)},{st.get('rotate', 0)},3,{st['outline']},0,"
+                f"{alignment},60,60,{margin_v},1")
     else:
         # BorderStyle 3 draws OutlineColour as a filled box behind the text.
         # For a per-word chip the base box is fully transparent (alpha FF) and
@@ -590,6 +665,21 @@ def _header(margin_v: int, st: dict, play_res: tuple,
     shadow = st.get("shadow", 0)
     spacing = st.get("spacing", 0)
     angle = st.get("rotate", 0)
+    # BackColour is the shadow. The default is a soft translucent black; a
+    # preset that names a colour gets it fully opaque, which is the difference
+    # between "a bit of depth" and the hard offset of sticker/comic type.
+    back_colour = st.get("shadow_color") or "&H80000000"
+
+    # The halo layer: the same text with an invisible fill and a wide stroke in
+    # the glow colour, blurred per event (a style cannot carry a blur). Drawn on
+    # the layer underneath, so the real caption sits crisp on top of its light.
+    glow_style = ""
+    if _has_glow(st):
+        glow = st["glow"].replace("&H00", "&H38", 1)       # slightly translucent
+        glow_style = (
+            f"\nStyle: {GLOW_STYLE},{st['font']},{st['size']},&HFF000000,"
+            f"&HFF000000,{glow},&HFF000000,-1,0,0,0,100,100,{spacing},{angle},1,"
+            f"{st['outline'] + GLOW_SPREAD},0,{alignment},60,60,{margin_v},1")
 
     return f"""[Script Info]
 ScriptType: v4.00+
@@ -600,7 +690,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,{st["font"]},{st["size"]},{primary},{secondary},{outline_colour},&H80000000,-1,0,0,0,100,100,{spacing},{angle},{border_style},{st["outline"]},{shadow},{alignment},60,60,{margin_v},1
+Style: Caption,{st["font"]},{st["size"]},{primary},{secondary},{outline_colour},{back_colour},-1,0,0,0,100,100,{spacing},{angle},{border_style},{outline_width},{shadow},{alignment},60,60,{margin_v},1{glow_style}{chip_style}
 Style: Title,{ts["font"]},{ts["size"]},{ts["colour"]},{ts["colour"]},{ts["edge"]},&H00000000,-1,0,0,0,100,100,0,0,{ts["border_style"]},{ts["outline"]},{ts["shadow"]},8,90,90,60,1
 
 [Events]
@@ -701,19 +791,170 @@ def _title_events(title: str, play_res: tuple, title_style: str = None) -> str:
             f"{{\\an8}}{text}\n")
 
 
-def _keyworded(rendered: list, cue: list, key_set: set, st: dict) -> str:
+# Spoken numbers that carry a stat. Single-digit words are left out on purpose:
+# "one of the", "no one", "two of us" are filler far more often than figures.
+NUMBER_WORDS = {
+    "ten", "eleven", "twelve", "fifteen", "twenty", "thirty", "forty", "fifty",
+    "sixty", "seventy", "eighty", "ninety", "hundred", "thousand", "million",
+    "billion", "trillion", "percent", "dozen", "half", "double", "triple",
+}
+KEYWORD_EMPHASIS_SCALE = 112
+# A number-shaped token: 20, 2008, 3.5, 1,000, $5, 40%, 10k, 1st, 90s.
+_NUMBER = _re.compile(r"^[$\u20b9\u20ac\u00a3]?\d[\d,.:]*(%|k|m|b|st|nd|rd|th|s)?$")
+
+
+def _key_token(text: str) -> str:
+    """A word as keyword matching sees it: lower case, no punctuation, no 's."""
+    t = (text or "").lower().strip(".,!?;:\"'()[]\u0964\u2019\u201c\u201d")
+    for suffix in ("'s", "\u2019s"):
+        if t.endswith(suffix):
+            t = t[: -len(suffix)]
+    return t
+
+
+def keyword_hits(words: list, keywords: list = None) -> set:
+    """Indices into `words` that the clip is ABOUT.
+
+    Keywords from the analyzer are often phrases ("what is a woman"), and the
+    old check compared each caption word against the whole phrase, so a phrase
+    keyword never matched anything. Phrases are matched as runs of words here,
+    plural and possessive forms count ("women's" for "women"), and numbers --
+    the stats a clip usually turns on -- are always emphasised, at no cost.
+    """
+    tokens = [_key_token(_word_text(w)) for w in words]
+    hits = set()
+    phrases = []
+    for keyword in keywords or []:
+        parts = [_key_token(p) for p in str(keyword).split()]
+        parts = [p for p in parts if p]
+        if parts:
+            phrases.append(parts)
+    for i in range(len(tokens)):
+        for phrase in phrases:
+            n = len(phrase)
+            window = tokens[i:i + n]
+            if len(window) == n and all(
+                    a == b or (len(b) > 3 and a.rstrip("s") == b.rstrip("s"))
+                    for a, b in zip(window, phrase)):
+                hits.update(range(i, i + n))
+        if _NUMBER.match(tokens[i]) or tokens[i] in NUMBER_WORDS:
+            hits.add(i)
+    return hits
+
+
+def _keyworded(rendered: list, cue: list, key_hits: set, st: dict) -> str:
     """Cue text with the clip's keywords coloured, nothing else marked."""
     parts = []
     for j, token in enumerate(rendered):
-        bare = _word_text(cue[j]).strip(".,!?;:।").lower()
-        if bare and bare in key_set:
-            parts.append(f"{{\\c{st.get('keyword', st['active'])}&}}{token}{{\\r}}")
+        if j in key_hits:
+            parts.append(f"{{{_keyword_override(st)}}}{token}{{\\r}}")
         else:
             parts.append(token)
     return " ".join(parts)
 
 
-def _phrase_event(rendered: list, cue: list, key_set: set, st: dict,
+def _keyword_override(st: dict, factor: float = 1.0) -> str:
+    """Colour, and optionally size, for a word the clip is ABOUT.
+
+    A keyword has to read as different from both the resting text and the word
+    being spoken. Where the preset's keyword colour is one of those two (many
+    looks use one accent for both, and a recoloured base takes the keyword
+    colour with it), size carries the emphasis instead.
+    """
+    colour = st.get("keyword", st["active"])
+    scale = st.get("keyword_scale", 100)
+    if scale == 100 and colour in (st["active"], st["base"]):
+        scale = KEYWORD_EMPHASIS_SCALE
+    return f"\\c{colour}&" + _scale_tags(scale * factor)
+
+
+def _dialogue(start: float, end: float, text: str, st: dict) -> list:
+    """The Dialogue line(s) for one caption event.
+
+    Almost always one. A glow preset adds a second copy on the layer below,
+    carrying the halo: same text and the same overrides, so it tracks every pop
+    and reveal of the caption above it exactly.
+    """
+    span = f"{_ass_time(start)},{_ass_time(end)}"
+    if _has_chip_layer(st):
+        # Identical text on both layers: the marker override that makes the
+        # chip opaque for the spoken word also tints that word's stroke on the
+        # layer above, so the two always agree about which word is lit.
+        return [f"Dialogue: 0,{span},{CHIP_STYLE},,0,0,0,,{text}",
+                f"Dialogue: 1,{span},Caption,,0,0,0,,{text}"]
+    if not _has_glow(st):
+        return [f"Dialogue: 0,{span},Caption,,0,0,0,,{text}"]
+    blur = f"\\blur{GLOW_BLUR}"
+    # A reset wipes the blur along with everything else, so it is restated after
+    # every one -- otherwise the halo turns into a hard coloured outline mid-line.
+    halo = "{" + blur + "}" + text.replace("{\\r", "{\\r" + blur)
+    return [f"Dialogue: 0,{span},{GLOW_STYLE},,0,0,0,,{halo}",
+            f"Dialogue: 1,{span},Caption,,0,0,0,,{text}"]
+
+
+def _compose(rendered: list, cue: list, key_hits: set, st: dict,
+             active_index: int) -> str:
+    """One cue's text at the instant word `active_index` is being spoken.
+
+    Handles the three things a word can be at that instant -- spoken, a keyword,
+    or not yet said -- and the stacked layout, where the lead-in sits small above
+    a final word drawn at full size.
+
+    Every styled token is closed with a reset PLUS the line's resting scale, not
+    a bare reset: the space that follows belongs to the resting size, and a bare
+    reset on a 58% line leaves full-width gaps between small words.
+    """
+    effect = st.get("active_effect", "color")
+    count = len(rendered)
+    stacked = st.get("mode") == "stack" and count > 1
+    small = st.get("stack_small", 58) / 100.0
+    reveal = bool(st.get("reveal"))
+
+    def line(lo, hi, factor, emphasised=False):
+        rest = _scale_tags(100 * factor)
+        reset = "{\\r" + rest + "}"
+        parts = []
+        for j in range(lo, hi):
+            token = rendered[j]
+            keyword = j in key_hits
+            if reveal and j > active_index:
+                tags = rest + "\\alpha&HFF&"
+            elif count == 1 and effect == "color":
+                # One word per cue means every word is "the active word". Painting
+                # it in the highlight colour turns a white-on-black caption into a
+                # solid-colour caption -- a different style, not a faster cadence.
+                # Keep the resting colour unless the word is a keyword.
+                tags = _keyword_override(st, factor) if keyword else rest
+            elif j == active_index:
+                # Inline overrides need BOTH the &H prefix and a trailing &.
+                # Without the trailing &, libass mis-parses the tag and leaks
+                # stray punctuation into the rendered line.
+                tags = _active_override(st, j, factor)
+            elif effect == "gradient":
+                # The ramp has to run across the WHOLE cue, not just the word
+                # being spoken -- colouring one word from a four-colour ramp
+                # and leaving the rest white reads as alternating text. libass
+                # cannot interpolate colour within a glyph, so per-word steps
+                # are the ramp.
+                tags = f"\\c{GRADIENT_RAMP[j % len(GRADIENT_RAMP)]}&" + rest
+            elif keyword:
+                tags = _keyword_override(st, factor)
+            elif emphasised:
+                # The big word of a stack stays in the accent colour once it has
+                # landed -- it is the point of the line, not a passing highlight.
+                tags = f"\\c{st['active']}&"
+            else:
+                tags = rest
+            parts.append(f"{{{tags}}}{token}{reset}" if tags else token)
+        return " ".join(parts)
+
+    if stacked:
+        return (line(0, count - 1, small) + "\\N"
+                + line(count - 1, count, 1.0, emphasised=True))
+    return line(0, count, 1.0)
+
+
+def _phrase_event(rendered: list, cue: list, key_hits: set, st: dict,
                   start: float, end: float, entrance: str, cue_ms: int,
                   play_res: tuple, margin_v: int) -> str:
     """One Dialogue for a whole chunk -- the Hormozi/MrBeast cadence.
@@ -723,12 +964,12 @@ def _phrase_event(rendered: list, cue: list, key_set: set, st: dict,
     here would put a travelling highlight on text the viewer finished reading
     before the second word was spoken.
     """
-    text = _keyworded(rendered, cue, key_set, st)
+    text = _keyworded(rendered, cue, key_hits, st)
     if entrance and entrance != "none":
         tags = animation_tags(entrance, cue_ms, play_res, margin_v)
         if tags:
             text = "{" + tags + "}" + text
-    return f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Caption,,0,0,0,,{text}"
+    return "\n".join(_dialogue(start, end, text, st))
 
 
 # A character reveal is one Dialogue per step, so an unbounded step count would
@@ -761,9 +1002,7 @@ def _typewriter_events(rendered: list, st: dict,
         t1 = end if k == steps else start + span * k / steps
         if t1 <= t0:
             continue
-        events.append(
-            f"Dialogue: 0,{_ass_time(t0)},{_ass_time(t1)},Caption,,0,0,0,,{full[:cut]}"
-        )
+        events.extend(_dialogue(t0, t1, full[:cut], st))
     return events
 
 
@@ -789,7 +1028,7 @@ def _progress_event(rendered: list, cue: list, st: dict, clip_start_time: float,
         tags = animation_tags(entrance, cue_ms, play_res, margin_v)
         if tags:
             text = "{" + tags + "}" + text
-    return f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Caption,,0,0,0,,{text}"
+    return "\n".join(_dialogue(start, end, text, st))
 
 
 def _recolour(st: dict, color: str = None, active_color: str = None) -> dict:
@@ -810,6 +1049,61 @@ def _recolour(st: dict, color: str = None, active_color: str = None) -> dict:
     return {**st, **patch} if patch else st
 
 
+def _ass_seconds(value: str) -> float:
+    """H:MM:SS.cc from a Dialogue line -> seconds."""
+    try:
+        h, m, rest = value.split(":")
+        return int(h) * 3600 + int(m) * 60 + float(rest)
+    except (ValueError, AttributeError):
+        return -1.0
+
+
+def _place_captions(lines: list, positions: list, play_res: tuple,
+                    st: dict) -> list:
+    """Inject a per-scene \\pos into every caption event.
+
+    The style's MarginV sets one baseline for the whole file. A clip whose
+    layout changes -- single to split and back on every speaker change -- needs
+    the text to move with it, and ASS has no per-event margin. \\pos is the
+    per-event placement the format does have.
+
+    Only bottom-anchored styles are handled: for those, y is the bottom of the
+    block, which is the same coordinate margin_v uses. A middle-anchored style
+    would need a different origin, so it keeps its preset placement.
+    """
+    if not positions:
+        return lines
+    alignment = POSITIONS.get(st.get("position", "bottom"),
+                              POSITIONS["bottom"]).get("alignment")
+    if alignment != 2:
+        return lines
+    res_x, res_y = play_res
+    spans = sorted(positions, key=lambda p: p["start"])
+
+    out = []
+    for line in lines:
+        # Dialogue: layer,start,end,style,name,marginL,marginR,marginV,effect,text
+        parts = line.split(",", 9)
+        if len(parts) < 10 or parts[3] != "Caption":
+            out.append(line)
+            continue
+        seconds = _ass_seconds(parts[1])
+        chosen = None
+        for span in spans:
+            if span["start"] <= seconds < span["end"]:
+                chosen = span
+                break
+        if chosen is None and spans and seconds >= spans[-1]["end"]:
+            chosen = spans[-1]
+        if chosen is None:
+            out.append(line)
+            continue
+        y = int(round(res_y * float(chosen["pos"])))
+        head = ",".join(parts[:9])
+        out.append(f"{head},{{\\pos({res_x // 2},{y})}}{parts[9]}")
+    return out
+
+
 def build_ass(words: list, clip_start_time: float, out_path: str,
               margin_v: int = 150, style: str = "classic",
               play_res: tuple = (PLAY_RES_X, PLAY_RES_Y),
@@ -820,6 +1114,8 @@ def build_ass(words: list, clip_start_time: float, out_path: str,
               title_style: str = None, title_font: str = None,
               title_size: int = None,
               cue_emoji: dict = None,
+              max_words: int = None,
+              positions: list = None,
               lock_margin: bool = False) -> str:
     """Writes an ASS file whose timings are relative to the clip's own start.
 
@@ -829,7 +1125,7 @@ def build_ass(words: list, clip_start_time: float, out_path: str,
                      to the bottom of the caption block
     style:           key into STYLES; unknown names fall back to classic
     """
-    st = STYLES.get(style, STYLES["classic"])
+    st = _preset_style(style)
     family = resolve_font(font)
     if family:
         st = {**st, "font": family}
@@ -838,6 +1134,11 @@ def build_ass(words: list, clip_start_time: float, out_path: str,
     if size_px:
         st = {**st, "size": max(MIN_CAPTION_PX, min(MAX_CAPTION_PX, int(size_px)))}
     st = _recolour(st, color, active_color)
+    # The editor's "1 / 2 / 3 words" control overrides the preset's cadence for
+    # this clip only. It has to be applied before anything groups cues -- the
+    # emoji planner uses the same number, or the marks land on the wrong lines.
+    if max_words:
+        st = {**st, "max_words": max(1, min(8, int(max_words)))}
 
     # Romanize Devanagari words so the chosen caption font is preserved.
     # _fit_devanagari decides whether romanization or a font swap is needed.
@@ -855,7 +1156,10 @@ def build_ass(words: list, clip_start_time: float, out_path: str,
     # Keywords stay coloured for the whole cue, independent of the karaoke
     # highlight. Reference clips from finished tools use this to make the point
     # of a line readable at a glance, even when paused mid-scroll.
-    key_set = {k.strip().lower() for k in (keywords or []) if k and k.strip()}
+    # Matched across the whole clip, then handed to each cue as local indices,
+    # so a keyword phrase is found even when cue chunking splits it.
+    global_hits = keyword_hits(words, keywords)
+    position = {id(w): i for i, w in enumerate(words)}
 
     cues = list(group_words(words, st.get("max_words")))
     mode = st.get("mode", "karaoke")
@@ -863,6 +1167,7 @@ def build_ass(words: list, clip_start_time: float, out_path: str,
 
     for ci, cue in enumerate(cues):
         rendered = [_escape(_word_text(w)) for w in cue]
+        key_hits = {j for j, w in enumerate(cue) if position.get(id(w)) in global_hits}
         if st["uppercase"]:
             rendered = [t.upper() for t in rendered]
 
@@ -892,7 +1197,7 @@ def build_ass(words: list, clip_start_time: float, out_path: str,
         # read all of them before the second is spoken, so a travelling highlight
         # adds motion without adding information.
         if mode == "phrase":
-            lines.append(_phrase_event(rendered, cue, key_set, st, cue_start,
+            lines.append(_phrase_event(rendered, cue, key_hits, st, cue_start,
                                        cue_end, entrance, cue_ms, play_res,
                                        margin_v))
             continue
@@ -938,41 +1243,23 @@ def build_ass(words: list, clip_start_time: float, out_path: str,
             if end <= 0 or end <= start:
                 continue
 
-            parts = []
-            for j, token in enumerate(rendered):
-                bare = _word_text(cue[j]).strip(".,!?;:\u0964").lower()
-                if j == i:
-                    # Inline overrides need BOTH the &H prefix and a trailing &.
-                    # Without the trailing &, libass mis-parses the tag and leaks
-                    # stray punctuation into the rendered line. \r resets every
-                    # override back to the style in one tag.
-                    parts.append(f"{{{_active_override(st, j)}}}{token}{{\\r}}")
-                elif effect == "gradient":
-                    # The ramp has to run across the WHOLE cue, not just the word
-                    # being spoken -- colouring one word from a four-colour ramp
-                    # and leaving the rest white reads as alternating text, which
-                    # is the opposite of the effect. libass cannot interpolate
-                    # colour within a glyph, so per-word steps are the ramp.
-                    parts.append(f"{{\\c{GRADIENT_RAMP[j % len(GRADIENT_RAMP)]}&}}"
-                                 f"{token}{{\\r}}")
-                elif bare and bare in key_set:
-                    parts.append(f"{{\\c{st.get('keyword', st['active'])}&}}{token}{{\\r}}")
-                else:
-                    parts.append(token)
-            text = " ".join(parts)
+            text = _compose(rendered, cue, key_hits, st, i)
 
             # Animate only the FIRST word event of a cue. Re-triggering the
             # entrance on every word would make the line jitter continuously
             # instead of arriving once.
-            if entrance and entrance != "none" and i == 0:
+            # A one-word cue is often under 150ms. The entrance animation is
+            # clamped to a 60ms minimum, which at 25fps is one or two frames --
+            # a flicker, not an arrival. Hard-cut those; the eye reads a new
+            # word appearing as a clean change.
+            if entrance and entrance != "none" and i == 0 and len(cue) > 1:
                 tags = animation_tags(entrance, cue_ms, play_res, margin_v)
                 if tags:
                     text = "{" + tags + "}" + text
 
-            lines.append(
-                f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Caption,,0,0,0,,{text}"
-            )
+            lines.extend(_dialogue(start, end, text, st))
 
+    lines = _place_captions(lines, positions, play_res, st)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     return out_path
@@ -1003,7 +1290,7 @@ def build_ass_lines(caption_lines: list, out_path: str,
     the original utterance spans stay honest: the line appears exactly while
     that sentence is being said. Times here are already clip-relative.
     """
-    st = STYLES.get(style, STYLES["classic"])
+    st = _preset_style(style)
     family = resolve_font(font)
     if family:
         st = {**st, "font": family}
@@ -1044,9 +1331,7 @@ def build_ass_lines(caption_lines: list, out_path: str,
         # animation_tags returns BARE tags; unbraced they render as literal
         # text, so colour and animation share one override block.
         override = f"{{{anim}{colour}}}" if (anim or colour) else ""
-        out.append(
-            f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Caption,,0,0,0,,{override}{text}"
-        )
+        out.extend(_dialogue(start, end, f"{override}{text}", st))
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
     return out_path

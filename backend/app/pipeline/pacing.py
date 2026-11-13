@@ -36,8 +36,18 @@ MIN_SEGMENT = 0.20
 
 
 def max_pause_for_frame(frame: str = None) -> float:
-    """The pacing profile that matches a template's editorial rhythm."""
-    return PODCAST_MAX_PAUSE if frame == "podcast" else DEFAULT_MAX_PAUSE
+    """The pacing profile that matches a template's editorial rhythm.
+
+    "auto" is between the two: the planner has not chosen a layout yet when the
+    pause budget is decided, and the middle value is right for both conversational
+    podcasts and gameplay commentary. Cutting a podcast too tight sounds
+    machine-gunned; leaving a gameplay clip loose loses the reaction.
+    """
+    if frame == "podcast":
+        return PODCAST_MAX_PAUSE
+    if frame == "auto":
+        return (PODCAST_MAX_PAUSE + DEFAULT_MAX_PAUSE) / 2
+    return DEFAULT_MAX_PAUSE
 
 
 def plan_segments(words: list, max_pause: float = DEFAULT_MAX_PAUSE) -> list:

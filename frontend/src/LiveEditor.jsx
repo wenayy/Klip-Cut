@@ -71,9 +71,32 @@ const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/u;
    has a plate behind it and wants no stroke at all. */
 function strokeShadow(st) {
   if (st.box === "line") return "none";
-  const w = Math.min(0.09, ((st.outline || 0) / (st.px || 76)) * 0.9);
-  if (!w) return st.shadow ? "0.03em 0.04em 0.05em rgba(0,0,0,.8)" : "none";
-  return `${w}em 0 0 #000, -${w}em 0 0 #000, 0 ${w}em 0 #000, 0 -${w}em 0 #000`;
+  const px = st.px || 76;
+  /* A chip-layer preset strokes its text at textOutline; `outline` is then the
+     chip's padding, not a stroke. */
+  const strokePx = st.textOutline ?? (st.box === "word" ? 0 : st.outline || 0);
+  const w = Math.min(0.09, (strokePx / px) * 0.9);
+  const ink = st.outlineColor || "#000";
+  const layers = [];
+  if (w) {
+    /* Eight offsets, not four: at the widths the signature looks use, the four
+       cardinal copies leave visible notches on the diagonals. */
+    const d = w * 0.7071;
+    layers.push(`${w}em 0 0 ${ink}`, `-${w}em 0 0 ${ink}`,
+                `0 ${w}em 0 ${ink}`, `0 -${w}em 0 ${ink}`,
+                `${d}em ${d}em 0 ${ink}`, `-${d}em ${d}em 0 ${ink}`,
+                `${d}em -${d}em 0 ${ink}`, `-${d}em -${d}em 0 ${ink}`);
+  }
+  if (st.shadow) {
+    const off = (st.shadow / px) + w;
+    /* A named shadow colour is the hard, opaque offset of sticker type; the
+       default is the renderer's soft translucent black. */
+    layers.push(st.shadowColor
+      ? `${off}em ${off}em 0 ${st.shadowColor}`
+      : `${off}em ${off}em 0.05em rgba(0,0,0,.55)`);
+  }
+  if (st.glow) layers.push(`0 0 .22em ${st.glow}`, `0 0 .5em ${st.glow}`);
+  return layers.length ? layers.join(", ") : "none";
 }
 
 /* How the spoken word is marked, mirroring subtitles._active_override. This is
@@ -81,11 +104,75 @@ function strokeShadow(st) {
    for that reason -- everything it reads was computed by the server. */
 const PREVIEW_RAMP = ["#8040f0", "#d060e0", "#f080d0", "#60d0f0"];
 
-function previewWordStyle(st, i, active) {
-  if (st.effect === "gradient") return { color: PREVIEW_RAMP[i % PREVIEW_RAMP.length] };
-  // Phrase presets replace the whole chunk and mark nothing inside it.
-  if (!active || st.mode === "phrase") return undefined;
+function previewWordStyle(st, i, activeIndex, count, keyword = false) {
+  const active = i === activeIndex;
+  /* Mirrors subtitles._compose: a stacked look draws its lead-in small on one
+     line and the last word at full size on the next. */
+  const stacked = st.mode === "stack" && count > 1;
+  const big = stacked && i === count - 1;
+  const layout = stacked
+    ? (big
+      ? { display: "block", color: st.active }
+      : { fontSize: `${(st.stackSmall || 58) / 100}em` })
+    : undefined;
+  // Words that have not been spoken yet hold their place but stay hidden.
+  if (st.reveal && i > activeIndex) return { ...layout, visibility: "hidden" };
 
+  if (st.effect === "gradient") {
+    return { ...layout, color: PREVIEW_RAMP[i % PREVIEW_RAMP.length] };
+  }
+  // Phrase presets replace the whole chunk and mark nothing inside it -- except
+  // keywords, which are the point of the line in every look.
+  if (!active || st.mode === "phrase") {
+    return keyword ? { ...layout, ...keywordStyle(st) } : layout;
+  }
+  const lit = { ...layout, ...activeWordStyle(st) };
+  // The big word of a stack owns its line whichever effect is marking it.
+  if (big) lit.display = "block";
+  return lit;
+}
+
+/* Mirrors subtitles.keyword_hits for one cue: keyword phrases matched as runs
+   of words (plurals and possessives count) plus spoken numbers, which are
+   always emphasised. */
+const NUMBER_WORDS = new Set(["ten", "eleven", "twelve", "fifteen", "twenty",
+  "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred",
+  "thousand", "million", "billion", "trillion", "percent", "dozen", "half",
+  "double", "triple"]);
+
+function keyToken(text) {
+  return (text || "").toLowerCase()
+    .replace(/^[.,!?;:"'()\[\]\u0964\u2019\u201c\u201d]+|[.,!?;:"'()\[\]\u0964\u2019\u201c\u201d]+$/g, "")
+    .replace(/('|\u2019)s$/, "");
+}
+
+function keywordHits(words, keywords) {
+  const tokens = words.map(keyToken);
+  const phrases = (keywords || []).map((k) => String(k).split(/\s+/).map(keyToken).filter(Boolean))
+    .filter((p) => p.length);
+  const same = (a, b) => a === b || (b.length > 3 && a.replace(/s+$/, "") === b.replace(/s+$/, ""));
+  const hits = new Set();
+  tokens.forEach((tok, i) => {
+    for (const phrase of phrases) {
+      const win = tokens.slice(i, i + phrase.length);
+      if (win.length === phrase.length && win.every((t, k) => same(t, phrase[k]))) {
+        phrase.forEach((_, k) => hits.add(i + k));
+      }
+    }
+    if (/^[$\u20b9\u20ac\u00a3]?\d[\d,.:]*(%|k|m|b|st|nd|rd|th|s)?$/.test(tok) || NUMBER_WORDS.has(tok)) hits.add(i);
+  });
+  return hits;
+}
+
+function keywordStyle(st) {
+  const colour = st.keyword || st.active;
+  const scale = st.keywordScale && st.keywordScale !== 100 ? st.keywordScale
+    : (colour === st.active || colour === st.color ? 112 : 100);
+  return scale === 100 ? { color: colour }
+    : { color: colour, display: "inline-block", transform: `scale(${scale / 100})` };
+}
+
+function activeWordStyle(st) {
   switch (st.effect) {
     case "marker":
       return { background: st.boxColor || st.active, color: st.color,
@@ -103,6 +190,49 @@ function previewWordStyle(st, i, active) {
     default:
       return { color: st.active };
   }
+}
+
+/* Mirrors reframe.motion_segments + reframe.expr: keyframes reduced to holds and
+   moves, each move eased with a smoothstep. Stepping to the last keyframe made
+   the preview camera jump twice a second while the export glided. */
+const MOTION_EPSILON = 0.5;
+
+function motionSegments(keys, axis) {
+  const pts = keys.map((k) => [k[0], Math.round(k[axis] * 10) / 10]);
+  if (pts.length <= 2) return pts;
+  const dir = (a, b) => {
+    const d = b[1] - a[1];
+    return Math.abs(d) <= MOTION_EPSILON ? 0 : Math.sign(d);
+  };
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length - 1; i++) {
+    if (dir(pts[i - 1], pts[i]) !== dir(pts[i], pts[i + 1])) out.push(pts[i]);
+  }
+  out.push(pts[pts.length - 1]);
+  for (let i = 1; i < out.length; i++) {
+    if (Math.abs(out[i][1] - out[i - 1][1]) <= MOTION_EPSILON) {
+      out[i] = [out[i][0], out[i - 1][1]];
+    }
+  }
+  return out;
+}
+
+const segmentCache = new WeakMap();
+
+function easedAt(keys, axis, t) {
+  let byAxis = segmentCache.get(keys);
+  if (!byAxis) { byAxis = {}; segmentCache.set(keys, byAxis); }
+  const segs = byAxis[axis] || (byAxis[axis] = motionSegments(keys, axis));
+  if (t <= segs[0][0]) return segs[0][1];
+  for (let i = 1; i < segs.length; i++) {
+    const [t1, v1] = segs[i];
+    if (t < t1) {
+      const [t0, v0] = segs[i - 1];
+      const s = Math.min(1, Math.max(0, (t - t0) / Math.max(t1 - t0, 1e-3)));
+      return v0 + (v1 - v0) * s * s * (3 - 2 * s);
+    }
+  }
+  return segs[segs.length - 1][1];
 }
 
 /* Mirrors render.MIN_CONTENT_FRACTION / MAX_ZOOM / content_height().
@@ -373,6 +503,17 @@ export default function LiveEditor({
     capSize: initial.caption_size ?? null,       // null = the style's own size
     capPos: initial.caption_pos ?? null,         // null = automatic placement
     capAnim: initial.caption_anim || "none",
+    /* How many words share a caption cue. null keeps the preset's own cadence;
+       1 is the one-word-at-a-time look, 3 the reference's chunk size. */
+    capWords: initial.words_per_cue ?? job.options?.words_per_cue ?? null,
+    /* Punch-in on key words. An editorial look, not a correction, so it is its
+       own remembered choice and rides the undo stack with everything else. */
+    autoZoom: initial.auto_zoom ?? (job.options?.auto_zoom === true),
+    autoTransitions: initial.auto_transitions ??
+      (job.options?.auto_transitions === true),
+    autoSfx: initial.auto_sfx ?? (job.options?.auto_sfx === true),
+    musicBed: initial.music_bed ?? (job.options?.music_bed === true),
+    autoBroll: initial.auto_broll ?? (job.options?.auto_broll !== false),
     /* Colour overrides on top of the preset. Every preset ships white text, so
        picking a "style" only ever changed how the spoken word was marked --
        this is the axis people reach for first. null = keep the preset's own. */
@@ -382,6 +523,10 @@ export default function LiveEditor({
        are posted with the platform's own captions or none at all, and until now
        the only way to get one was to re-run the whole job. */
     capOn: initial.captions_on ?? (job.options?.burn_subtitles !== false),
+    /* Emoji is its own switch because "the captions are right but the emoji is
+       not my channel" is a real, common edit. It is remembered per clip, so a
+       re-export keeps the choice instead of silently reintroducing them. */
+    autoEmoji: initial.auto_emoji ?? (job.options?.auto_emoji !== false),
     translateTo: initial.translate_to ?? null,
     title: clip.title || "",
     titleStyle: initial.title_style || (job.options?.burn_title === false ? "none" : "plate"),
@@ -401,7 +546,8 @@ export default function LiveEditor({
   const doc = history.state;
   const {
     start, end, ratio, template, capStyle, capFont, capSize, capPos, capAnim,
-    capColor, capActive, capOn,
+    capWords, capColor, capActive, capOn, autoEmoji, autoZoom, autoTransitions,
+    autoSfx, musicBed, autoBroll,
     translateTo, title, titleStyle, titleFont, titleSize, speed, speedPitched, tightenPauses,
     background, gameplayFile,
     overlayList, lineEdits,
@@ -439,9 +585,17 @@ export default function LiveEditor({
   const setCapSize = (v) => history.apply({ capSize: v });
   const setCapPos = set("capPos");
   const setCapAnim = (v) => history.apply({ capAnim: v }, { discrete: true });
+  const setCapWords = (v) => history.apply({ capWords: v }, { discrete: true });
+  const setAutoZoom = (v) => history.apply({ autoZoom: v }, { discrete: true });
+  const setAutoTransitions = (v) =>
+    history.apply({ autoTransitions: v }, { discrete: true });
+  const setAutoSfx = (v) => history.apply({ autoSfx: v }, { discrete: true });
+  const setMusicBed = (v) => history.apply({ musicBed: v }, { discrete: true });
+  const setAutoBroll = (v) => history.apply({ autoBroll: v }, { discrete: true });
   const setCapColor = (v) => history.apply({ capColor: v }, { discrete: true });
   const setCapActive = (v) => history.apply({ capActive: v }, { discrete: true });
   const setCapOn = (v) => history.apply({ capOn: v }, { discrete: true });
+  const setAutoEmoji = (v) => history.apply({ autoEmoji: v }, { discrete: true });
   const setTranslateTo = (v) => history.apply({ translateTo: v }, { discrete: true });
   const setTitle = (v) => history.apply({ title: v });
   const setTitleStyle = (v) => history.apply({ titleStyle: v }, { discrete: true });
@@ -511,7 +665,8 @@ export default function LiveEditor({
   /* Templates that composite something on top of the source have to be shown
      composited, or the editor is previewing a different video than it exports.
      Split-screen is the loud case: half the frame is gameplay. */
-  const TEMPLATE_FRAMES = { classic: "blur", fitvideo: "fit", gameplay: "gameplay" };
+  const TEMPLATE_FRAMES = { classic: "blur", fitvideo: "fit", gameplay: "gameplay",
+                            podcast: "podcast", auto: "auto" };
   const activeTemplate = template || job.options?.template || "classic";
   const frame = TEMPLATE_FRAMES[activeTemplate]
     || job.options?.frame
@@ -579,6 +734,10 @@ export default function LiveEditor({
      is. It used to be the letterboxed height with no zoom at all. */
   const fgHeight = frameMode === "blur" || frameMode === "fit"
     ? contentHeightFrac(srcDims?.w, srcDims?.h, outW, outH)
+    /* Auto falls back to `fit` when the planner finds nothing to frame, so
+       without a plan it previews exactly that. */
+    : frameMode === "auto"
+    ? Math.min(contentHeightFrac(srcDims?.w, srcDims?.h, outW, outH), 1)
     /* Podcast never zooms -- cropping a two-shot removes a speaker -- so the
        block is exactly the letterboxed height, sat high. */
     : frameMode === "podcast"
@@ -600,13 +759,15 @@ export default function LiveEditor({
      too, so the two stay in agreement either way. */
   const [reframePlan, setReframePlan] = useState(null);
   useEffect(() => {
-    if (frameMode !== "podcast" || !job?.id) { setReframePlan(null); return; }
+    if ((frameMode !== "podcast" && frameMode !== "auto") || !job?.id) {
+      setReframePlan(null); return;
+    }
     let live = true;
-    getClipReframe(job.id, index)
+    getClipReframe(job.id, index, null, null, activeTemplate, autoZoom, autoBroll)
       .then((d) => { if (live) setReframePlan(d.plan || null); })
       .catch(() => { if (live) setReframePlan(null); });
     return () => { live = false; };
-  }, [job?.id, index, frameMode]);
+  }, [job?.id, index, frameMode, activeTemplate, autoZoom, autoBroll]);
 
   /* One crop window as CSS, mirroring smart_filter's crop+scale.
      The renderer maps a `win` box from the source onto the whole tile; the same
@@ -625,14 +786,30 @@ export default function LiveEditor({
     };
   }
 
+  /* Mirrors render's `fit` tiles: keep the crop's own aspect inside the tile
+     rather than stretching it to fill. Used by the gaming stack's webcam band,
+     where cropping to the tile's aspect would be a forehead close-up. */
+  function fitStyle(winW, winH, cx, cy, sw, sh, rectW, rectH) {
+    const tileW = outW * rectW;
+    const tileH = outH * rectH;
+    const scale = Math.min(tileW / winW, tileH / winH);
+    return {
+      position: "absolute",
+      width: `${((sw * scale) / tileW) * 100}%`,
+      height: `${((sh * scale) / tileH) * 100}%`,
+      left: `${50 - ((cx * scale) / tileW) * 100}%`,
+      top: `${50 - ((cy * scale) / tileH) * 100}%`,
+      objectFit: "fill",
+      maxWidth: "none",
+    };
+  }
+
   /* Crop centre at the current playhead. The plan is keyframed in clip-relative
      seconds, the same timebase the renderer's expressions use; holding the last
      key past the end matches how those expressions behave too. */
   function windowAt(keys, t) {
     if (!keys?.length) return null;
-    let k = keys[0];
-    for (const cand of keys) { if (cand[0] <= t) k = cand; else break; }
-    return { cx: k[1], cy: k[2] };
+    return { cx: easedAt(keys, 1, t), cy: easedAt(keys, 2, t) };
   }
 
   /* The scale factor comes from the PLAN's own source dimensions, never from
@@ -640,8 +817,8 @@ export default function LiveEditor({
      in full-resolution source pixels -- dividing one by the other produced a
      crop three times too small and a video that filled a third of its tile.
      The plan carries `src` precisely so the two numbers come from one place. */
-  const smartFrame = frameMode === "podcast" && reframePlan?.src
-    ? reframePlan : null;
+  const smartFrame = (frameMode === "podcast" || frameMode === "auto")
+    && reframePlan?.src ? reframePlan : null;
   const [planW, planH] = smartFrame ? smartFrame.src : [0, 0];
   /* `now` is a source timestamp; the plan's keys were rebased against the range
      it was COMPUTED for, which is the clip's own bounds. So the offset is
@@ -662,6 +839,14 @@ export default function LiveEditor({
         win: smartFrame.win,
         keys,
       })) || [];
+  /* The caption baseline this scene wants, from the plan's own per-scene
+     placement. Only used when the user has not dragged captions by hand. */
+  const sceneCapPos = capPos === null
+    ? (smartFrame?.captions || []).find((c, i, all) => (
+        smartT >= c.start && (smartT < c.end || i === all.length - 1)
+      ))?.pos ?? null
+    : null;
+
   const visibleSmartTiles = smartTiles
     .map((tile) => ({ ...tile, point: windowAt(tile.keys, smartT) }))
     .filter((tile) => tile.point);
@@ -693,12 +878,16 @@ export default function LiveEditor({
   }, [proxyReady, proxySrc]);
 
   const view = useMemo(() => {
-    const total = transcript?.duration ?? clip.end + CONTEXT;
+    // `||`, not `??`: a source with no speech can report 0, which is not a length.
+    const total = transcript?.duration || clip.end + CONTEXT;
     return { from: Math.max(0, clip.start - CONTEXT), to: Math.min(total, clip.end + CONTEXT) };
   }, [transcript, clip.start, clip.end]);
 
   const tightenMaxPause = job.options?.template === "podcast"
-    ? PODCAST_TIGHTEN_MAX_PAUSE : TIGHTEN_MAX_PAUSE;
+    ? PODCAST_TIGHTEN_MAX_PAUSE
+    : job.options?.template === "auto"
+    ? (PODCAST_TIGHTEN_MAX_PAUSE + TIGHTEN_MAX_PAUSE) / 2
+    : TIGHTEN_MAX_PAUSE;
   const viewMap = useMemo(
     () => buildTimelineMap(
       transcript, view.from, view.to, lineEdits, tightenPauses, tightenMaxPause),
@@ -775,6 +964,13 @@ export default function LiveEditor({
         caption_color: capColor,
         caption_active_color: capActive,
         captions_on: capOn,
+        auto_emoji: autoEmoji,
+        words_per_cue: capWords,
+        auto_zoom: autoZoom,
+        auto_transitions: autoTransitions,
+        auto_sfx: autoSfx,
+        music_bed: musicBed,
+        auto_broll: autoBroll,
         translate_to: translateTo,
         title: title.trim() || null,
         title_style: titleStyle,
@@ -925,7 +1121,7 @@ export default function LiveEditor({
       words = toks.map((w, k) => ({ t: u.start + k * dt, e: u.start + (k + 1) * dt, w }));
     }
 
-    const cues = groupWords(words, st.maxWords || rules.max_words,
+    const cues = groupWords(words, capWords || st.maxWords || rules.max_words,
                             rules.max_seconds);
     const active = cues.find((c) => now >= c[0].t && now <= c[c.length - 1].e)
       || cues.find((c) => now < c[0].t)
@@ -934,8 +1130,9 @@ export default function LiveEditor({
 
     let activeIndex = active.findIndex((w) => now >= w.t && now <= w.e);
     if (activeIndex < 0) activeIndex = now > active[active.length - 1].e ? active.length - 1 : 0;
-    return { words: active.map((w) => w.w), activeIndex };
-  }, [transcript, now, lineEdits, st]);
+    const kw = keywordHits(active.map((w) => w.w), clip.keywords);
+    return { words: active.map((w) => w.w), activeIndex, kw };
+  }, [transcript, now, lineEdits, st, capWords, clip.keywords]);
 
   /* One place that moves the playhead, so scrubbing from the trim bar, the
      layer strip or the transcript all behave identically -- including keeping
@@ -1034,6 +1231,13 @@ export default function LiveEditor({
         caption_color: capColor,
         caption_active_color: capActive,
         captions_on: capOn,
+        auto_emoji: autoEmoji,
+        words_per_cue: capWords,
+        auto_zoom: autoZoom,
+        auto_transitions: autoTransitions,
+        auto_sfx: autoSfx,
+        music_bed: musicBed,
+        auto_broll: autoBroll,
         translate_to: translateTo,
         title: title.trim() || null,
         title_style: titleStyle,
@@ -1216,7 +1420,7 @@ export default function LiveEditor({
           <div className="live-stage">
             <div className={`stage-frame frame-${frameMode} ratio-${ratio.replace(":", "-")}`}
                  style={{ aspectRatio: String(RATIOS[ratio] ?? 9 / 16),
-                          background: frameMode === "fit"
+                          background: (frameMode === "fit" || frameMode === "auto")
                             ? (background === "black" ? "#000" : background)
                             : "#000" }}>
               {isSplit ? (
@@ -1252,19 +1456,28 @@ export default function LiveEditor({
                       <div key={`${smartScene?.start ?? 0}-${tileIndex}`}
                            className="stage-tile"
                            style={{ left: `${x * 100}%`, top: `${y * 100}%`,
-                                    width: `${w * 100}%`, height: `${h * 100}%` }}>
-                        <video
-                          ref={tileIndex === 0
-                            ? videoRef
-                            : (el) => { podcastTileRefs.current[tileIndex - 1] = el; }}
-                          src={proxySrc}
-                          playsInline muted={tileIndex > 0} preload="auto"
-                          aria-hidden={tileIndex > 0 ? "true" : undefined}
-                          onClick={togglePlay}
-                          onLoadedMetadata={tileIndex === 0 ? onMeta : undefined}
-                          style={cropStyle(tile.win[0], tile.win[1],
-                                           tile.point.cx, tile.point.cy, planW, planH)}
-                        />
+                                    width: `${w * 100}%`, height: `${h * 100}%`,
+                                    background: tile.backdrop
+                                      ? "linear-gradient(165deg, #1a1f27, #08090b)"
+                                      : undefined }}>
+                        {!tile.backdrop && (
+                          <video
+                            ref={tileIndex === 0
+                              ? videoRef
+                              : (el) => { podcastTileRefs.current[tileIndex - 1] = el; }}
+                            src={proxySrc}
+                            playsInline muted={tileIndex > 0} preload="auto"
+                            aria-hidden={tileIndex > 0 ? "true" : undefined}
+                            onClick={togglePlay}
+                            onLoadedMetadata={tileIndex === 0 ? onMeta : undefined}
+                            style={tile.fit
+                              ? fitStyle(tile.win[0], tile.win[1],
+                                         tile.point.cx, tile.point.cy,
+                                         planW, planH, w, h)
+                              : cropStyle(tile.win[0], tile.win[1],
+                                          tile.point.cx, tile.point.cy, planW, planH)}
+                          />
+                        )}
                       </div>
                     );
                   })}
@@ -1300,7 +1513,7 @@ export default function LiveEditor({
                           objectFit: "contain" }
                       /* Fit: the same zoomed block as blur, sat at its own bias
                          so the taller bar underneath is the caption band. */
-                      : frameMode === "fit"
+                      : (frameMode === "fit" || frameMode === "auto")
                       ? { height: `${fgHeight * 100}%`,
                           top: `${blockTop(FIT_CONTENT_BIAS) * 100}%` }
                       : undefined}
@@ -1335,6 +1548,9 @@ export default function LiveEditor({
                   className={`stage-caption draggable cap-enter-${st.entrance || "none"} ${st.position === "middle" && capPos === null ? "mid" : ""}`}
                   style={capPos !== null
                     ? { top: `${capPos * 100}%`, bottom: "auto", transform: "translateY(-50%)" }
+                    : sceneCapPos !== null
+                    ? { top: `${sceneCapPos * 100}%`, bottom: "auto",
+                        transform: "translateY(-100%)" }
                     : undefined}
                   onMouseDown={(e) => {
                     e.stopPropagation();
@@ -1347,7 +1563,9 @@ export default function LiveEditor({
                     key={cue.words.join(" ")}
                     className="cap-inner"
                     style={{
-                      fontFamily: fontCss(capFont),
+                      /* The preset's own typeface unless one was picked by
+                         hand -- the renderer resolves it in the same order. */
+                      fontFamily: fontCss(capFont ?? st.font),
                       fontSize: `${((capSize ?? st.px) / outW) * 100}cqw`,
                       fontWeight: 900,
                       color: st.color,
@@ -1363,7 +1581,7 @@ export default function LiveEditor({
                     }}
                   >
                     {cue.words.map((w, i) => (
-                      <span key={i} style={previewWordStyle(st, i, i === cue.activeIndex)}>
+                      <span key={i} style={previewWordStyle(st, i, cue.activeIndex, cue.words.length, cue.kw?.has(i))}>
                         {w}{" "}
                       </span>
                     ))}
@@ -1520,6 +1738,9 @@ export default function LiveEditor({
           <div className="live-transcript">
             {loadError && <div className="editor-error">{loadError}</div>}
             {!transcript && !loadError && <div className="editor-loading">Loading…</div>}
+            {transcript && !transcript.utterances?.length && (
+              <div className="editor-loading">No speech in this clip, so there are no captions to edit.</div>
+            )}
             {transcript?.utterances?.map((u, i) => {
               const inClip = u.end > start && u.start < end;
               const active = now >= u.start && now <= u.end;
@@ -1547,10 +1768,53 @@ export default function LiveEditor({
         {section === "layout" && (
         <div className="live-controls">
           <div className="ctl">
+            <span className="ctl-label">Sound</span>
+            <button type="button"
+                    className={`chip-btn ${autoSfx ? "on" : ""}`}
+                    onClick={() => setAutoSfx(!autoSfx)}
+                    title="Whoosh on each layout cut, mixed under the real audio."
+                    data-testid="auto-sfx-toggle">
+              Auto SFX
+            </button>
+            <button type="button"
+                    className={`chip-btn ${musicBed ? "on" : ""}`}
+                    onClick={() => setMusicBed(!musicBed)}
+                    title="A quiet, ducked music bed under the voice."
+                    data-testid="music-bed-toggle">
+              Music bed
+            </button>
+          </div>
+          <div className="ctl">
+            <span className="ctl-label">Look good</span>
+            <button type="button"
+                    className={`chip-btn ${autoZoom ? "on" : ""}`}
+                    onClick={() => setAutoZoom(!autoZoom)}
+                    title="Punch in on the clip's key words."
+                    data-testid="auto-zoom-toggle">
+              Auto Zoom
+            </button>
+            <button type="button"
+                    className={`chip-btn ${autoTransitions ? "on" : ""}`}
+                    onClick={() => setAutoTransitions(!autoTransitions)}
+                    title="A short dip through black at every layout cut."
+                    data-testid="auto-transitions-toggle">
+              Auto transitions
+            </button>
+            <button type="button"
+                    className={`chip-btn ${autoBroll ? "on" : ""}`}
+                    onClick={() => setAutoBroll(!autoBroll)}
+                    title="Cut to the full game frame for a beat at action peaks."
+                    data-testid="auto-broll-toggle">
+              B-roll
+            </button>
+          </div>
+          <div className="ctl">
             <span className="ctl-label">Template</span>
             {[
+              { id: "auto",     label: "Auto" },
+              { id: "podcast",  label: "Podcast" },
               { id: "classic",  label: "Classic" },
-              { id: "gameplay", label: "Gameplay" },
+              { id: "gameplay", label: "Split" },
               { id: "fitvideo", label: "Fit video" },
             ].map((t) => (
               <button key={t.id}
@@ -1622,6 +1886,35 @@ export default function LiveEditor({
             <span className="ctl-label">Caption style</span>
             <CaptionPresetPicker value={capStyle} onChange={setCapStyle}
                                  data={presetData} />
+          </div>
+          <div className="ctl">
+            <span className="ctl-label">Words</span>
+            <div className="segmented words-seg" role="group" aria-label="Words per cue">
+              {[1, 2, 3].map((n) => {
+                const current = capWords || st.maxWords || 3;
+                return (
+                  <button key={n} type="button"
+                          className={`seg ${current === n ? "on" : ""}`}
+                          aria-pressed={current === n}
+                          onClick={() => setCapWords(n)}
+                          data-testid={`cap-words-${n}`}>
+                    {n === 1 ? "1 at a time" : n}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="ctl">
+            <span className="ctl-label">Emoji</span>
+            <button
+              type="button"
+              className={`chip-btn ${autoEmoji ? "on" : ""}`}
+              onClick={() => setAutoEmoji(!autoEmoji)}
+              title={autoEmoji
+                ? "Emoji on the few lines that earn one. Click for none."
+                : "No emoji in the export. Click to allow them again."}
+              data-testid="emoji-toggle"
+            >{autoEmoji ? "On key lines" : "Off"}</button>
           </div>
         </div>
         )}

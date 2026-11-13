@@ -25,6 +25,16 @@ const LENGTHS = {
   long: "60–90s", extended: "Over 90s",
 };
 
+/* What the moment picker hunts for. Auto is right for most videos; naming the
+   genre is for the ones it cannot tell from the outside -- a gaming video with
+   wall-to-wall commentary, or a podcast uploaded under a file name. */
+const GENRES = [
+  { value: "auto", label: "Auto", hint: "Detect from the video" },
+  { value: "podcast", label: "Podcast", hint: "Insights, stories, sharp claims" },
+  { value: "gaming", label: "Gaming", hint: "Clutches, fails, reactions" },
+  { value: "general", label: "Other", hint: "Vlogs, essays, tutorials" },
+];
+
 function LockIcon() {
   return (
     <svg className="chip-lock" viewBox="0 0 24 24" width="13" height="13"
@@ -109,6 +119,7 @@ function ChoiceButtons({ label, value, options, onChange, className = "" }) {
                   className={value === option.value ? "selected" : ""}
                   onClick={() => onChange(option)}
                   aria-pressed={value === option.value}
+                  title={option.hint}
                   data-testid={option.testid}>
             {option.locked && <LockIcon />}
             <span>{option.label}</span>
@@ -271,6 +282,15 @@ export default function StudioWizard({
                 onChange={(option) => prefs.setRatio(option.value)}
               />
               <ChoiceButtons
+                label="Content type"
+                value={prefs.genre}
+                options={GENRES.map((g) => ({
+                  value: g.value, label: g.label, hint: g.hint,
+                  testid: `opt-genre-${g.value}`,
+                }))}
+                onChange={(option) => prefs.setGenre(option.value)}
+              />
+              <ChoiceButtons
                 label="Clip length"
                 value={prefs.lengthPref}
                 options={Object.entries(LENGTHS).map(([value, label]) => ({ value, label }))}
@@ -414,6 +434,8 @@ export default function StudioWizard({
               ? (source.file?.name || "Uploaded file")
               : (source.preview?.title || source.url)} />
             <Row label="Clips" value={`${prefs.nClips} × ${LENGTHS[prefs.lengthPref].toLowerCase()}`} />
+            <Row label="Content" value={GENRES.find((g) => g.value === prefs.genre)?.label
+              + " · " + GENRES.find((g) => g.value === prefs.genre)?.hint.toLowerCase()} />
             <Row label="Format" value={`${prefs.ratio} · ${templates.find((t) => t.id === prefs.template)?.name || prefs.template}`} />
             <Row label="Captions" value={prefs.burnSubtitles
               ? (captionData?.presets?.find((p) => p.id === prefs.captionStyle)?.name || "On")

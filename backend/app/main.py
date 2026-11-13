@@ -42,8 +42,9 @@ from app.jobs import (create_job, expire_due_jobs, get_job, get_job_transcript,
                       list_jobs, update_job)
 from app.models import Clip, FreeEditorExport, Job, Share, User, _iso_utc
 from app.pipeline import (analyzer, caption_emoji, caption_presets, censor,
-                          energy, downloader, pacing, reframe, render, scoring,
-                          subtitles, transcriber, voiceover)
+                          content, emoji_overlay, energy, downloader, hinglish,
+                          music, pacing, reframe, render, scoring, subtitles,
+                          transcriber, voiceover)
 from app.dodo_catalog import subscription_product
 
 app = FastAPI(title="Clipper API")
@@ -121,6 +122,16 @@ def _render_slot(job_id: str = None, wait: float = None):
         _RENDER_SLOTS.release()
 
 
+# "auto" is resolved per job by content.guess_genre; the rest name a rubric in
+# analyzer.GENRES directly.
+GENRE_CHOICES = ("auto", "general", "podcast", "gaming")
+
+# Below this share of the runtime being speech, a gameplay video's moments are
+# in the game rather than in what is said over it, so they are found by sound
+# and motion and the commentary just rides along as captions.
+ACTION_FIRST_COVERAGE = 0.25
+
+
 # Templates provide framing defaults. Caption styling is chosen separately in
 # Preferences and stored on the job, while these legacy defaults keep old jobs
 # rendering exactly as they did before the choices were separated.
@@ -133,12 +144,23 @@ TEMPLATES = {
                  "label": "Tech"},
     "business": {"frame": "fill",     "caption_style": "business",
                  "label": "Business"},
+    # NOT the gaming template. This is the retention-bait split: a talking head
+    # over a stock gameplay loop. Real gameplay footage is handled by Auto (or
+    # by the layout it picks); the old name made the two indistinguishable.
     "gameplay": {"frame": "gameplay", "caption_style": "gameplay",
-                 "label": "Gameplay"},
+                 "label": "Split screen"},
     # Podcasts are a two-shot problem: the zoom every other template uses to
     # fill the frame is exactly what crops the second person out of it.
     "podcast":  {"frame": "podcast",  "caption_style": "podcast_clean",
                  "label": "Podcast"},
+    # Chooses one of the treatments above per clip, from the footage itself.
+    # The manual templates stay as an override: a gaming channel can pin its
+    # layout, and everyone else stops having to know in advance what their
+    # video is.
+    "auto":     {"frame": "auto",     "caption_style": "pro_caps",
+                 "label": "Auto",
+                 "note": "Detects podcast, talking head, gameplay + facecam, "
+                         "gameplay or screencast per clip"},
 }
 
 
@@ -310,17 +332,43 @@ class JobRequest(BaseModel):
     language: str = "English"
     burn_subtitles: bool = True
     burn_title: bool = True
-    template: str = "classic"       # key into TEMPLATES
+    template: str = "auto"          # key into TEMPLATES
     caption_style: str = "karaoke_fill"  # independent of the frame layout
     ratio: str = "9:16"             # key into render.RATIOS
     length_pref: str = "any"        # key into analyzer.LENGTH_PREFS
     intent: str = ""                # free-text steer, e.g. "when he talks about pricing"
+    # What kind of video this is, which decides what counts as a good moment:
+    # "auto" works it out from the title and how much of the runtime is speech.
+    genre: str = "auto"             # auto | general | podcast | gaming
+    # Filled in by the server from the link's own metadata; never trusted for
+    # anything but the genre guess.
+    source_title: Optional[str] = None
     tighten_pauses: bool = True     # cut dead air so the clip does not feel merely trimmed
     auto_censor: bool = True        # mute profanity and star it in captions
-    # Let the model mark the cues that earn an emoji. Off by default: it costs
-    # one extra model call per clip, and emoji suit some channels and actively
-    # cheapen others, so this is a choice rather than a default.
-    auto_emoji: bool = False
+    # Mark the cues that earn an emoji. On by default now that a keyword
+    # fallback exists: it costs one model call per clip when a key is
+    # configured, and nothing at all when it is not. Clients that specifically
+    # want plain captions can still send false.
+    auto_emoji: bool = True
+    # 1/2/3 words on screen at a time. None keeps the caption preset's cadence,
+    # which is what the wizard uses; the editor sets it per clip.
+    # Must be Optional: _start_job freezes req.dict() onto the job, which
+    # stores None for "use the preset". A plain `int = None` accepted None at
+    # construction from the request but REJECTED it when the worker rebuilt
+    # JobRequest from the stored options -- so every job crashed at 0% before
+    # the pipeline began, while the API happily returned 200.
+    words_per_cue: Optional[int] = None
+    # Punch-in on the clip's key words and a dip at real layout cuts. On by
+    # default: a batch of otherwise-identical static crops was the single
+    # loudest "these look boring" complaint, and both are editorial flourishes
+    # the editor exposes as one-click toggles. SFX stays opt-in -- a whoosh on
+    # every cut is a taste, not a default.
+    auto_zoom: bool = True
+    auto_transitions: bool = True
+    auto_sfx: bool = False
+    # Opt-in: a bed changes the mood of every clip, so it should be a choice.
+    music_bed: bool = False
+    auto_broll: bool = True
     # Transcribe speech that switches language mid-sentence with the model that
     # can follow it. Off by default and gated on the plan -- see billing.allows.
     multilingual: bool = False
@@ -429,6 +477,43 @@ def on_startup():
 INLINE_WORKER = os.environ.get("CLIPPER_INLINE_WORKER", "1").lower() not in (
     "0", "false", "no", "off")
 
+# Hinglish repair needs one LLM call per job. On by default only for jobs that
+# asked for multilingual transcription (or whose transcript actually contains
+# Devanagari); pure English jobs never pay for it.
+# Off by default: every Devanagari word is romanised offline, for free, with
+# its ASR timing intact (hinglish.romanize). The LLM rewrite on top only adds
+# context fixes for misheard phrases, and Devanagari is the most token-hungry
+# script there is. Set CLIPPER_HINGLISH_CLEANUP=1 to pay for it anyway.
+HINGLISH_CLEANUP = os.environ.get("CLIPPER_HINGLISH_CLEANUP", "0").lower() not in (
+    "0", "false", "no", "off")
+
+
+# Set when this process is told to shut down. Uvicorn first waits for open
+# connections to close -- and the editor holds video streams open -- so a
+# "stopped" server could linger for hours with its worker thread still taking
+# new jobs. Three such processes were once found running side by side, the
+# oldest processing jobs with code from a day earlier.
+_WORKER_STOP = threading.Event()
+
+
+def _stop_worker_on_signals() -> None:
+    """Chain onto the server's own SIGTERM/SIGINT handlers: stop claiming, then
+    let the server shut down exactly as it would have. A job already running
+    finishes; only NEW work is refused."""
+    import signal
+    if threading.current_thread() is not threading.main_thread():
+        return
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        previous = signal.getsignal(sig)
+        if not callable(previous):
+            continue
+
+        def handler(signum, frame, previous=previous):
+            _WORKER_STOP.set()
+            previous(signum, frame)
+
+        signal.signal(sig, handler)
+
 
 def _start_inline_worker() -> None:
     if not INLINE_WORKER:
@@ -448,7 +533,7 @@ def _start_inline_worker() -> None:
     def loop():
         name = f"inline:{queue.worker_name()}"
         last_reap = 0.0
-        while True:
+        while not _WORKER_STOP.is_set():
             try:
                 now = time.monotonic()
                 if now - last_reap > 60:
@@ -463,6 +548,9 @@ def _start_inline_worker() -> None:
                 print(f"[clipper] inline worker error\n{traceback.format_exc()}")
                 time.sleep(5)
 
+        print("[clipper] inline worker stopped: shutting down, no new jobs taken")
+
+    _stop_worker_on_signals()
     threading.Thread(target=loop, name="clipper-inline-worker",
                      daemon=True).start()
     print("[clipper] inline worker started (CLIPPER_INLINE_WORKER=0 to disable)")
@@ -710,7 +798,8 @@ def me(user: User = Depends(auth.current_user_required)):
     # `entitlements` rides along here rather than only on /billing/me because
     # this is what the app loads on boot, and the clip-creation form needs to
     # know what the plan unlocks before it can render its controls correctly.
-    return {"id": user.id, "email": user.email, "credits": user.credits,
+    return {"id": user.id, "email": user.email,
+            "credits": billing.balance(user.id),
             "plan": user.plan,
             "entitlements": sorted(billing.entitlements_for(user.plan, user.email)),
             # Ceilings, not switches: clip count, source length and upload size.
@@ -835,10 +924,19 @@ class ClipEdit(BaseModel):
     caption_lines: Optional[list[CaptionLine]] = None   # rewritten subtitle text
     caption_font: Optional[str] = None        # id from subtitles.FONTS
     translate_to: Optional[str] = None        # language code from translation.LANGUAGES
+    auto_emoji: Optional[bool] = None          # None = the job's own setting
+    words_per_cue: Optional[int] = None        # 1/2/3 words on screen at a time
+    auto_zoom: Optional[bool] = None            # punch-in on key words
+    auto_transitions: Optional[bool] = None     # dip through black at cuts
+    auto_sfx: Optional[bool] = None             # whoosh on cuts
+    music_bed: Optional[bool] = None            # ducked background music
+    auto_broll: Optional[bool] = None           # gameplay cutaways
 
 
 @app.get("/jobs/{job_id}/reframe/{index}")
-def clip_reframe(job_id: str, index: int, start: float = None, end: float = None):
+def clip_reframe(job_id: str, index: int, start: float = None, end: float = None,
+                 template: str = None, auto_zoom: bool = False,
+                 auto_broll: bool = True):
     """Where the faces are, so the editor can PREVIEW the podcast composition.
 
     The editor draws its preview from the source proxy and composes the frame
@@ -853,9 +951,13 @@ def clip_reframe(job_id: str, index: int, start: float = None, end: float = None
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="No such job.")
-    tpl = TEMPLATES.get((job.get("options") or {}).get("template", "classic"),
-                        TEMPLATES["classic"])
-    if tpl["frame"] != "podcast":
+    # The editor can switch the template after the clip exists, so the request
+    # may be asking about a different framing than the one the job was born
+    # with. Without this, switching a Classic job to Auto previewed the old
+    # letterbox until it was exported.
+    wanted = template or (job.get("options") or {}).get("template", "classic")
+    tpl = TEMPLATES.get(wanted, TEMPLATES["classic"])
+    if tpl["frame"] not in ("podcast", "auto"):
         return {"plan": None}          # every other frame is fixed geometry
 
     clips = job.get("clips") or []
@@ -869,9 +971,13 @@ def clip_reframe(job_id: str, index: int, start: float = None, end: float = None
     # Include the planner version. Reusing a v1 whole-clip stacked plan after the
     # adaptive planner shipped would preserve duplicated speakers in old projects
     # even though every new render was fixed.
+    # The zoom variant is a different plan for the same range; sharing a cache
+    # file with the un-zoomed preview made the Auto Zoom toggle appear to do
+    # nothing on the second click.
     cache = os.path.join(
         job_dir,
-        f"reframe_v{reframe.PLAN_VERSION}_{index}_{s:.1f}_{e:.1f}.json",
+        (f"reframe_v{reframe.PLAN_VERSION}_{index}_{s:.1f}_{e:.1f}"
+         f"{'_zoom' if auto_zoom else ''}.json"),
     )
     if os.path.exists(cache):
         with open(cache) as f:
@@ -886,8 +992,19 @@ def clip_reframe(job_id: str, index: int, start: float = None, end: float = None
         transcript = get_job_transcript(job_id)
         speaker_words = (editing.words_in_range(transcript, s, e)
                          if transcript else None)
-        plan = reframe.plan(
-            source, s, e, out_w, out_h, speaker_words=speaker_words)
+        zoom_windows = (reframe._keyword_windows(
+                            speaker_words or [], clip.get("keywords") or [],
+                            clip.get("title") or "")
+                        if auto_zoom else None)
+        if tpl["frame"] == "auto":
+            plan = content.plan(source, s, e, out_w, out_h,
+                                speaker_words=speaker_words,
+                                zoom_windows=zoom_windows, variant=index,
+                                title=clip.get("title", ""), broll=auto_broll)
+        else:
+            plan = reframe.plan(source, s, e, out_w, out_h,
+                                speaker_words=speaker_words,
+                                zoom_windows=zoom_windows)
     except Exception as exc:
         print(f"[clipper] editor reframe preview failed: {exc}")
         return {"plan": None}
@@ -908,8 +1025,12 @@ def job_transcript(job_id: str):
                    "existed cannot be edited -- re-run the video to enable it.",
         )
     utterances = transcriber.get_utterances(transcript)
+    # The source length, not the last word: silent gameplay has no words, and a
+    # duration of 0 collapsed the editor's trim bar to nothing (both ends read
+    # 0:00.0 and neither handle could move).
+    source_seconds = (get_job(job_id) or {}).get("source_duration") or 0
     return {
-        "duration": utterances[-1]["end"] if utterances else 0,
+        "duration": max(utterances[-1]["end"] if utterances else 0, source_seconds),
         # Word timings travel too: the editor reproduces the renderer's cue
         # chunking from them, so the preview breaks captions in exactly the same
         # places the exported video will. Showing whole sentences there was a
@@ -1127,7 +1248,7 @@ class Overlay(BaseModel):
     opacity: float = 1.0
 
 
-EDITOR_TEMPLATES = {"classic", "fitvideo", "gameplay"}
+EDITOR_TEMPLATES = {"classic", "fitvideo", "gameplay", "podcast", "auto"}
 
 
 class ClipRecipe(BaseModel):
@@ -1151,6 +1272,13 @@ class ClipRecipe(BaseModel):
     caption_color: Optional[str] = None     # CSS hex for the resting text
     caption_active_color: Optional[str] = None   # CSS hex for the spoken word
     captions_on: Optional[bool] = None      # False = export with no captions
+    auto_emoji: Optional[bool] = None       # False = export without emoji
+    words_per_cue: Optional[int] = None     # 1/2/3 words per caption cue
+    auto_zoom: Optional[bool] = None        # punch-in on key words
+    auto_transitions: Optional[bool] = None # dip through black at cuts
+    auto_sfx: Optional[bool] = None         # whoosh on layout cuts
+    music_bed: Optional[bool] = None        # ducked background music
+    auto_broll: Optional[bool] = None       # gameplay cutaways
     speed: Optional[float] = None           # 0.5 - 3.0 playback speed
     speed_pitched: Optional[bool] = None    # True = pitch rides with speed (meme)
     tighten_pauses: Optional[bool] = None   # per-clip original/tight pacing
@@ -1399,6 +1527,13 @@ def export_clip(job_id: str, index: int,
                 caption_color=recipe.get("caption_color"),
                 caption_active_color=recipe.get("caption_active_color"),
                 captions_on=recipe.get("captions_on", True),
+                auto_emoji=recipe.get("auto_emoji"),
+                words_per_cue=recipe.get("words_per_cue"),
+                auto_zoom=recipe.get("auto_zoom"),
+                auto_transitions=recipe.get("auto_transitions"),
+                auto_sfx=recipe.get("auto_sfx"),
+                music_bed=recipe.get("music_bed"),
+                auto_broll=recipe.get("auto_broll"),
                 speed=recipe.get("speed"),
                 speed_pitched=bool(recipe.get("speed_pitched")),
                 background=recipe.get("background"),
@@ -1454,6 +1589,13 @@ def rerender_clip(job_id: str, index: int, body: ClipEdit,
                 caption_lines=[l.dict() for l in body.caption_lines] if body.caption_lines else None,
                 caption_font=body.caption_font,
                 translate_to=body.translate_to,
+                auto_emoji=body.auto_emoji,
+                words_per_cue=body.words_per_cue,
+                auto_zoom=body.auto_zoom,
+                auto_transitions=body.auto_transitions,
+                auto_sfx=body.auto_sfx,
+                music_bed=body.music_bed,
+                auto_broll=body.auto_broll,
             )
     except ValueError as e:
         _release_editor_export(reservation_id)
@@ -1495,6 +1637,9 @@ def _prepare_job(req: JobRequest, user: User = None, uploaded: bool = False) -> 
     if not tpl:
         raise HTTPException(status_code=400,
                             detail=f"Unknown template. Choose from: {', '.join(TEMPLATES)}")
+    if req.genre not in GENRE_CHOICES:
+        raise HTTPException(status_code=400,
+                            detail=f"Unknown genre. Choose from: {', '.join(GENRE_CHOICES)}")
 
     limits = billing.limits_for(user.plan if user else None,
                                user.email if user else None)
@@ -1668,8 +1813,19 @@ def run_queued_job(job_id: str) -> None:
     # a duplicate argument and a TypeError on every single job.
     fields = set(JobRequest.model_fields)
     data = {k: v for k, v in options.items() if k in fields}
-    data["url"] = url          # the Job row is authoritative
-    req = JobRequest(**data)
+    # The Job row is authoritative. Keep unknown keys out, and fail the job
+    # cleanly rather than raising here: this runs before run_pipeline's handler,
+    # so an exception would be retried three times and leave the user staring at
+    # "Starting now" forever.
+    data["url"] = url
+    try:
+        req = JobRequest(**data)
+    except Exception as exc:
+        message = (f"This job's saved settings could not be read ({exc.__class__.__name__}). "
+                   "Run the video again with the current version.")
+        print(f"[worker] job {job_id} has unusable options: {exc}")
+        update_job(job_id, status="failed", error=message)
+        return
 
     uploaded = options.get("input_type") == "upload"
     # Re-resolved rather than carried: the loops are files on the worker's own
@@ -1708,6 +1864,7 @@ def submit_job(req: JobRequest, request: Request, background_tasks: BackgroundTa
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     _gate_source_duration(metadata.get("duration"), user)
+    req.source_title = (metadata.get("title") or "")[:200]
     job_id = _start_job(req, background_tasks, user, gameplay_loops=gameplay_loops)
     return {"job_id": job_id}
 
@@ -1984,6 +2141,11 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
         # Link jobs fetch an audio-only stream first. Uploads already live in
         # this job directory, so extracting audio locally avoids yt-dlp entirely.
         audio_path = os.path.join(job_dir, "audio.mp3")
+        source_has_audio = True
+        # Only an upload is on disk this early. A link job analyses the audio
+        # track alone and fetches the picture after the moments are chosen, so
+        # everything before that point has to cope with there being no file.
+        video_path = None
         if uploaded_source:
             # Not necessarily on this disk: the container that accepted the
             # upload is not the one rendering it. ensure_local returns the file
@@ -2004,7 +2166,11 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                 raise RuntimeError("The uploaded source video is missing. Upload it again.")
             update_job(job_id, status="downloading", progress_message="Getting your video ready...", percent=0)
             workspace.ensure_space(job_dir, os.path.getsize(video_path))
-            downloader.extract_audio(video_path, audio_path)
+            source_has_audio = render.has_audio(video_path)
+            if source_has_audio:
+                downloader.extract_audio(video_path, audio_path)
+            else:
+                print("[clipper] source has no audio; skipping speech analysis")
         else:
             update_job(job_id, status="downloading", progress_message="Getting your video ready...", percent=0)
             audio_path = downloader.download_audio(
@@ -2015,28 +2181,84 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                 ),
             )
 
+        # Transcription is one request with no progress of its own: a 3-hour
+        # source spends several minutes here with the bar standing still, which
+        # reads as a hang. Say how long it should take instead.
+        audio_minutes = (content.probe_duration(audio_path) / 60
+                         if source_has_audio and os.path.exists(audio_path) else 0)
+        listening = "Listening to the conversation..."
+        if audio_minutes >= 45:
+            listening = (f"Listening to all {audio_minutes / 60:.1f} hours -- long "
+                         f"videos take a few minutes here..."
+                         if audio_minutes >= 90 else
+                         f"Listening to all {audio_minutes:.0f} minutes -- this "
+                         f"takes a minute or two...")
         update_job(job_id, status="transcribing",
-                   progress_message="Listening to the conversation...", percent=0)
+                   progress_message=listening, percent=0)
         # The pricier model is asked for, not inferred. Tying it to the podcast
         # template was the wrong proxy: code-switching is a property of how
         # people SPEAK, not of the layout picked for them -- a bilingual
         # commentary video needs it and is not a podcast.
         # Diarization stays tied to the frame, because only the podcast
         # reframing reads speaker labels.
-        transcript_json = transcriber.transcribe(
-            audio_path,
-            multilingual=bool(req.multilingual),
-            diarize=tpl["frame"] == "podcast",
-        )
-        utterances = transcriber.get_utterances(transcript_json)
-        if not utterances:
-            raise RuntimeError(
-                "No speech was found in this video. Clipper needs talking to work with -- "
-                "try a podcast, interview, or commentary video."
+        if source_has_audio:
+            transcript_json = transcriber.transcribe(
+                audio_path,
+                multilingual=bool(req.multilingual),
+                # The auto planner may land on a podcast composition, and by then
+                # the transcript is already paid for -- so ask for speaker labels
+                # whenever the result might use them.
+                diarize=tpl["frame"] in ("podcast", "auto"),
+                keyterms=(hinglish.keyterms(req.source_title, req.intent)
+                          if req.multilingual else None),
             )
+        else:
+            # No audio means no Deepgram call at all: nothing to transcribe and
+            # nothing to bill for. The empty transcript is a real result here,
+            # not a failure, and the highlight picker below reads the footage.
+            transcript_json = {"results": {"utterances": []}}
+        utterances = transcriber.get_utterances(transcript_json)
+        if HINGLISH_CLEANUP and (req.multilingual or hinglish.has_devanagari(utterances)):
+            # Opt-in: one LLM pass that also fixes misheard phrases from
+            # context and re-times the corrected words; see pipeline/hinglish.py.
+            before = [u.get("transcript") for u in utterances]
+            utterances = hinglish.clean(utterances)
+            changed = sum(1 for a, b in zip(before, utterances)
+                          if (b.get("transcript") or "") != (a or ""))
+            print(f"[clipper] Hinglish cleanup: {changed} of {len(utterances)} "
+                  f"line(s) corrected")
+        if hinglish.has_devanagari(utterances):
+            # Nova-3 keeps English words English but still writes Hindi words in
+            # Devanagari. Romanise them here, once, before anything reads the
+            # transcript: the analyzer then reads Roman Hinglish (Devanagari
+            # costs several tokens a word), titles come back Roman, and the
+            # stored transcript the editor and re-exports use is already right.
+            utterances = hinglish.romanize(utterances)
+            print("[clipper] Hinglish: romanised Devanagari words offline")
+        silent_footage = False
+        if not utterances:
+            # Silence is not always a mistake. A gameplay VOD with no commentary,
+            # a music montage and a screen recording are all clippable, and
+            # failing them with "Clipper needs talking to work with" excluded
+            # exactly the kind of footage this product now supports. Fall back to
+            # an audio-visual highlight picker for the templates where that is
+            # the right answer; keep the error where speech is the content.
+            if tpl["frame"] not in ("auto", "gameplay"):
+                raise RuntimeError(
+                    "No speech was found in this video, and this template needs "
+                    "talking to work with. Try the Auto template for silent "
+                    "gameplay or screen footage."
+                )
+            silent_footage = True
+            transcript_json.setdefault("results", {}).setdefault("utterances", [])
+            source_seconds = content.probe_duration(
+                video_path or (audio_path if source_has_audio else ""))
+            if source_seconds <= 0:
+                raise RuntimeError("This video has no readable duration.")
+        else:
+            source_seconds = utterances[-1]["end"]
         numbered = transcriber.build_numbered_transcript(utterances)
         # Stored now so a later edit can reopen this job without paying Deepgram again.
-        source_seconds = utterances[-1]["end"] if utterances else 0
         update_job(job_id, transcript=transcript_json, source_duration=source_seconds)
 
         # Source length no longer sets the price, but it still sets OUR cost, so
@@ -2054,36 +2276,93 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
             workspace.clear_intermediates(job_dir)
             return
 
-        # Prosody: how lines were delivered, which the transcript cannot show.
         update_job(job_id, status="analyzing",
                    progress_message="Finding the strongest moments...", percent=0)
-        utterances = energy.analyze(audio_path, utterances)
+        # What kind of video this is decides what a good moment looks like. Worked
+        # out here because this is the first point both inputs exist -- the
+        # title from the link and the transcript -- and written back onto the
+        # job so the editor and any re-export agree with this run.
+        genre = req.genre if req.genre != "auto" else content.guess_genre(
+            utterances, source_seconds, req.source_title or "")
+        coverage = content.speech_coverage(utterances, source_seconds)
+        all_words = [w for u in utterances for w in (u.get("words") or [])]
+        print(f"[clipper] genre: {genre} (speech covers {coverage:.0%} of the source)")
+        if genre == "gaming":
+            # The action in a gameplay clip happens BETWEEN the lines. Pause
+            # tightening would cut exactly that, here and on every re-export.
+            job_options = {**job_options, "tighten_pauses": False}
+        job_options = {**job_options, "genre": genre}
+        update_job(job_id, options=job_options)
 
-        update_job(job_id,
-                   progress_message="Comparing the moments worth posting...",
-                   percent=0)
-        raw_clips = analyzer.pick_clips(
-            utterances,
-            req.n_clips,
-            intent=req.intent,
-            length_pref=req.length_pref,
-            # From the frozen options, so the tier billed for is the tier run.
-            model=analyzer.model_for(bool(job_options.get("advanced_model"))),
-            on_progress=lambda n, total: update_job(
-                job_id,
-                percent=100 if n < 0 else round(n / total * 100),
-                progress_message=(
-                    f"Comparing the {total} strongest moments..."
-                    if n < 0 else f"Reviewing moment {n} of {total}..."
+        # Sound-and-motion picking reads the picture when it is on disk (an
+        # upload) and the audio track alone when it is not (a link, whose video
+        # is only fetched once there is something worth rendering).
+        highlight_audio = audio_path if source_has_audio else None
+        action_first = (genre == "gaming" and not silent_footage
+                        and coverage < ACTION_FIRST_COVERAGE)
+
+        if silent_footage or action_first:
+            # Nothing to read, or too little of it to matter, so the moments
+            # come from the footage: motion peaks, sudden game audio, music
+            # hits. Same idea as the spoken path, just a different sensor. Any
+            # commentary inside a picked window still becomes its captions.
+            resolved_clips = content.highlight_moments(
+                video_path, source_seconds, req.n_clips,
+                audio_path=highlight_audio, length_pref=req.length_pref,
+                words=all_words)
+            if not resolved_clips:
+                raise RuntimeError(
+                    "This video has no speech and no strong action peaks, so "
+                    "there was nothing to clip."
+                )
+            print(f"[clipper] {'action-first' if action_first else 'silent footage'}: "
+                  f"picked {len(resolved_clips)} audio-visual highlight(s)")
+        else:
+            # Prosody: how lines were delivered, which the transcript cannot show.
+            utterances = energy.analyze(audio_path, utterances)
+
+            update_job(job_id,
+                       progress_message="Comparing the moments worth posting...",
+                       percent=0)
+            raw_clips = analyzer.pick_clips(
+                utterances,
+                req.n_clips,
+                intent=req.intent,
+                length_pref=req.length_pref,
+                genre=genre,
+                # From the frozen options, so the tier billed for is the tier run.
+                model=analyzer.model_for(bool(job_options.get("advanced_model"))),
+                on_progress=lambda n, total: update_job(
+                    job_id,
+                    percent=100 if n < 0 else round(n / total * 100),
+                    progress_message=(
+                        f"Comparing the {total} strongest moments..."
+                        if n < 0 else f"Reviewing moment {n} of {total}..."
+                    ),
                 ),
-            ),
-        )
-        if not raw_clips:
-            raise RuntimeError(
-                "Nothing in this video scored well enough to clip. Videos with a clear "
-                "spoken point -- podcasts, interviews, commentary -- work best."
             )
-        resolved_clips = [analyzer.resolve_clip_times(c, utterances) for c in raw_clips]
+            resolved_clips = [analyzer.resolve_clip_times(c, utterances)
+                              for c in raw_clips]
+            if genre == "gaming" and len(resolved_clips) < req.n_clips:
+                # A streamer's commentary rarely covers every good moment: the
+                # best play of the session is often met with silence or a single
+                # word. Fill what the transcript could not find from the game
+                # itself, keeping clear of what has already been picked.
+                extra = content.highlight_moments(
+                    video_path, source_seconds,
+                    req.n_clips - len(resolved_clips),
+                    audio_path=highlight_audio, length_pref=req.length_pref,
+                    words=all_words,
+                    avoid=[(c["start"], c["end"]) for c in resolved_clips])
+                if extra:
+                    print(f"[clipper] gaming: added {len(extra)} action "
+                          f"highlight(s) the commentary did not cover")
+                resolved_clips += extra
+            if not resolved_clips:
+                raise RuntimeError(
+                    "Nothing in this video scored well enough to clip. Videos with a "
+                    "clear spoken point -- podcasts, interviews, commentary -- work best."
+                )
 
         # Charged here, not earlier: the price is per clip, and only now is the
         # real number known. Asking for 5 and being handed 3 costs 3 -- billing
@@ -2160,6 +2439,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
             # margin -- which assumes equal bands -- would strand captions in
             # the corner of the taller band underneath.
             place = {"podcast": render.podcast_caption_margin_v,
+                     "auto": render.fit_caption_margin_v,
                      "fit": render.fit_caption_margin_v}.get(
                          tpl["frame"], render.caption_margin_v)
             margin_v = place(src_w, src_h, out_w, out_h)
@@ -2178,16 +2458,29 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
             clip_plan = None
             clip_margin_v = margin_v
             lock_margin = bool(gameplay_loops)
-            if tpl["frame"] == "podcast":
+            if tpl["frame"] in ("podcast", "auto"):
                 try:
-                    clip_plan = reframe.plan(
-                        video_path, clip["start"], clip["end"], out_w, out_h,
-                        speaker_words=clip_words)
+                    zoom_windows = (reframe._keyword_windows(
+                                        clip_words, clip.get("keywords"),
+                                        clip.get("title"))
+                                    if req.auto_zoom else None)
+                    if tpl["frame"] == "auto":
+                        clip_plan = content.plan(
+                            video_path, clip["start"], clip["end"], out_w, out_h,
+                            speaker_words=clip_words, zoom_windows=zoom_windows,
+                            variant=i, title=clip.get("title", ""),
+                            genre=genre, broll=req.auto_broll,
+                            source_title=req.source_title)
+                    else:
+                        clip_plan = reframe.plan(
+                            video_path, clip["start"], clip["end"], out_w, out_h,
+                            speaker_words=clip_words, zoom_windows=zoom_windows)
                 except Exception as exc:
-                    print(f"[clipper] clip {i}: reframing failed ({exc}); "
-                          "falling back to the fixed podcast frame")
+                    print(f"[clipper] clip {i}: framing failed ({exc}); "
+                          "falling back to the fixed frame")
                 if clip_plan:
-                    print(f"[clipper] clip {i}: reframing as {clip_plan['mode']}")
+                    print(f"[clipper] clip {i}: framing as "
+                          f"{content.describe(clip_plan)}")
                     clip_margin_v = render.smart_caption_margin_v(clip_plan, out_h)
                     lock_margin = True
                     cache_path = os.path.join(
@@ -2200,7 +2493,10 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
 
             segments = None
             render_duration = clip["end"] - clip["start"]
-            if req.tighten_pauses and clip_words:
+            # Never on gameplay or on a moment found by sound and motion: there
+            # the gaps between words ARE the clip.
+            if (req.tighten_pauses and clip_words and genre != "gaming"
+                    and not clip.get("highlight")):
                 segments, clip_words, removed = pacing.tighten(
                     clip_words, clip["start"], clip["end"],
                     max_pause=pacing.max_pause_for_frame(tpl["frame"]))
@@ -2210,6 +2506,19 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                     render_duration = sum(e - s for s, e in segments)
                     print(f"[clipper] clip {i}: removed {removed:.1f}s of dead air")
 
+            caption_positions = (reframe.caption_positions(
+                                    clip_plan, clip["start"], segments)
+                                 if clip_plan else None)
+            sfx_events = []
+            whoosh = render.whoosh_path()
+            if req.auto_sfx and clip_plan and whoosh:
+                sfx_events = [
+                    {"path": whoosh, "time": t, "gain": 0.26}
+                    for t in reframe.cut_times(clip_plan, clip["start"], segments)
+                ]
+            music_path = (music.path_for(genre, clip.get("title", ""), variant=i)
+                          if req.music_bed else None)
+
             mute_spans = None
             caption_words = clip_words
             if req.auto_censor and clip_words:
@@ -2218,15 +2527,25 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                 if mute_spans:
                     print(f"[clipper] clip {i}: muted {len(mute_spans)} word(s)")
 
+            emoji_overlays = []
             if req.mode == "original":
                 clip_title = clip.get("title", "") if req.burn_title else ""
                 if req.burn_subtitles and clip_words:
                     subtitle_path = os.path.join(job_dir, f"clip_{i}.ass")
                     caption_preset_id = caption_presets.get(req.caption_style)["id"]
                     cue_emoji = (
-                        caption_emoji.plan(caption_words, caption_preset_id)
+                        caption_emoji.plan(caption_words, caption_preset_id,
+                                           max_words=req.words_per_cue)
                         if req.auto_emoji else {}
                     )
+                    # Color emoji are composited as PNGs; anything without a
+                    # bundled asset stays a monochrome glyph in the ASS file.
+                    inline_emoji, emoji_overlays = emoji_overlay.plan_overlays(
+                        cue_emoji, caption_words, caption_preset_id,
+                        (out_w, out_h), clip_margin_v,
+                        0.0 if segments else clip["start"],
+                        max_words=req.words_per_cue,
+                        positions=caption_positions)
                     subtitles.build_ass(caption_words,
                                         0.0 if segments else clip["start"], subtitle_path,
                                         clip_margin_v,
@@ -2234,7 +2553,9 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                                         play_res=(out_w, out_h),
                                         title=clip_title,
                                         keywords=clip.get("keywords"),
-                                        cue_emoji=cue_emoji,
+                                        cue_emoji=inline_emoji,
+                                        max_words=req.words_per_cue,
+                                        positions=caption_positions,
                                         lock_margin=lock_margin)
                 elif clip_title.strip():
                     subtitle_path = os.path.join(job_dir, f"clip_{i}.ass")
@@ -2276,6 +2597,11 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                     segments=segments,
                     mute_spans=mute_spans,
                     reframe_plan=clip_plan,
+                    emoji_overlays=emoji_overlays,
+                    transitions=req.auto_transitions,
+                    sfx_events=sfx_events,
+                    music_path=music_path,
+                    music_gain=music.gain_for(genre),
                     watermark=options_watermark,
                     high_quality=bool(job_options.get("high_quality")),
                 ),
@@ -2328,6 +2654,10 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                 "score": shown_score,
                 "scores": shown_scores,
                 "voiceover_script": clip.get("voiceover_script"),
+                # Auto Zoom and keyword colouring both read this back on a
+                # re-export. Dropping it here made the editor's "Auto Zoom"
+                # toggle do nothing, because the only copy lived in memory.
+                "keywords": clip.get("keywords") or [],
                 "words": item["clip_words"],
             })
 

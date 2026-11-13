@@ -18,7 +18,8 @@ import os
 from app.db import SessionLocal
 from app.models import Clip, Job
 from app import storage
-from app.pipeline import (censor, downloader, pacing, reframe, render,
+from app.pipeline import (caption_emoji, censor, content, downloader,
+                          emoji_overlay, music, pacing, reframe, render,
                           subtitles, transcriber, translation)
 
 # A trim must still leave something watchable, and an extend must not run away
@@ -160,7 +161,14 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                   title_style: str = None, title_font: str = None,
                   title_size: int = None,
                   tighten_pauses: bool = None,
-                  template_override: str = None):
+                  template_override: str = None,
+                  auto_emoji: bool = None,
+                  words_per_cue: int = None,
+                  auto_zoom: bool = None,
+                  auto_transitions: bool = None,
+                  auto_sfx: bool = None,
+                  music_bed: bool = None,
+                  auto_broll: bool = None):
     """Re-cuts clip `index` of `job_id` to [start, end]. Returns the updated clip.
 
     `caption_style` overrides the template's caption look for this clip only.
@@ -212,10 +220,28 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
         # what makes a TRIM correct: the new range may cover different footage,
         # and framing keyed to the old range would be aimed at the wrong place.
         reframe_plan = None
-        if tpl["frame"] == "podcast":
+        if tpl["frame"] in ("podcast", "auto"):
             try:
-                reframe_plan = reframe.plan(
-                    source, start, end, out_w, out_h, speaker_words=words)
+                use_zoom = (options.get("auto_zoom", False)
+                            if auto_zoom is None else bool(auto_zoom))
+                zoom_windows = (reframe._keyword_windows(words, clip.keywords, clip.title)
+                                if use_zoom else None)
+                use_broll = (options.get("auto_broll", True)
+                             if auto_broll is None else bool(auto_broll))
+                if tpl["frame"] == "auto":
+                    reframe_plan = content.plan(
+                        source, start, end, out_w, out_h, speaker_words=words,
+                        zoom_windows=zoom_windows, variant=index,
+                        title=clip.title,
+                        genre=options.get("genre", ""), broll=use_broll,
+                        source_title=options.get("source_title", ""))
+                else:
+                    reframe_plan = reframe.plan(
+                        source, start, end, out_w, out_h, speaker_words=words,
+                        zoom_windows=zoom_windows)
+                if reframe_plan:
+                    print(f"[clipper] edit: framing as "
+                          f"{content.describe(reframe_plan)}")
             except Exception as exc:
                 print(f"[clipper] edit: reframing failed ({exc}); fixed frame")
 
@@ -236,6 +262,7 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
             # always picked per frame here; this path had been left behind.
             src_w, src_h = render.probe_dimensions(source)
             place = {"podcast": render.podcast_caption_margin_v,
+                     "auto": render.fit_caption_margin_v,
                      "fit": render.fit_caption_margin_v}.get(
                          tpl["frame"], render.caption_margin_v)
             margin_v = place(src_w, src_h, out_w, out_h)
@@ -275,12 +302,38 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
 
         # Segments rebase the clip to zero, so the caption offset has to follow.
         caption_offset = 0.0 if segments else start
+        # Layout-aware caption placement. A manual drag (caption_pos) wins; the
+        # plan's own per-scene positions only apply when the user has not
+        # overridden where the text goes.
+        caption_positions = (reframe.caption_positions(reframe_plan, start, segments)
+                             if reframe_plan and caption_pos is None else None)
+        use_sfx = (options.get("auto_sfx", False)
+                   if auto_sfx is None else bool(auto_sfx))
+        whoosh = render.whoosh_path()
+        sfx_events = ([{"path": whoosh, "time": t, "gain": 0.26}
+                       for t in reframe.cut_times(reframe_plan, start, segments)]
+                      if use_sfx and reframe_plan and whoosh else [])
 
         caption_words, mute_spans = (censor.apply(words, caption_offset)
                                      if options.get("auto_censor", True) and words
                                      else (words, None))
 
         has_title = (clip.title or "").strip() and title_style != "none"
+        # Recomputed, not stored. An emoji map is keyed by cue index against the
+        # CURRENT words, so storing it would put marks on the wrong lines the
+        # moment a caption was edited. This also fixes the older bug where every
+        # re-export silently dropped the emoji the first render had.
+        use_emoji = (options.get("auto_emoji", True)
+                     if auto_emoji is None else bool(auto_emoji))
+        cue_emoji = (caption_emoji.plan(caption_words, style,
+                                       max_words=words_per_cue)
+                     if use_emoji and caption_words else {})
+        # Color emoji are composited as PNGs; the ones without a bundled asset
+        # stay as monochrome glyphs inside the subtitle file.
+        inline_emoji, emoji_overlays = emoji_overlay.plan_overlays(
+            cue_emoji, caption_words, style, (out_w, out_h), margin_v,
+            caption_offset, max_words=words_per_cue,
+            positions=caption_positions)
         subtitle_path = None
         if captions_on and caption_words:
             subtitle_path = os.path.join(job_dir, f"clip_{index + 1}.ass")
@@ -315,6 +368,9 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                                     active_color=caption_active_color,
                                     title_style=title_style, title_font=title_font,
                                     title_size=title_size,
+                                    cue_emoji=inline_emoji,
+                                    max_words=words_per_cue,
+                                    positions=caption_positions,
                                     lock_margin=lock_margin)
         elif has_title:
             subtitle_path = os.path.join(job_dir, f"clip_{index + 1}.ass")
@@ -350,6 +406,17 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
             speed_pitched=speed_pitched,
             background=background,
             reframe_plan=reframe_plan,
+            emoji_overlays=emoji_overlays,
+            transitions=(options.get("auto_transitions", False)
+                         if auto_transitions is None else bool(auto_transitions)),
+            sfx_events=sfx_events,
+            music_path=(music.path_for(options.get("genre", ""), clip.title,
+                                        # Same track the first render used:
+                                        # main numbers clips from 1.
+                                        variant=index + 1)
+                        if (options.get("music_bed", False)
+                            if music_bed is None else bool(music_bed)) else None),
+            music_gain=music.gain_for(options.get("genre", "")),
             # The watermark decision was made when the job was created and is
             # stored with it. Re-reading the plan here would silently strip the
             # mark from every clip a lapsed subscriber re-exports.

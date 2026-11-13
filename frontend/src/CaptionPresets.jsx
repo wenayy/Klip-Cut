@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCaptionOptions } from "./api";
+import { installFontFaces } from "./CaptionToolbar";
 
 /**
  * The caption preset picker.
@@ -18,6 +19,7 @@ import { getCaptionOptions } from "./api";
 /* Sample text per category. A podcast preset shown on "THIS IS AMAZING" reads
    as a bad podcast preset; each family gets a line it is actually for. */
 const SAMPLES = {
+  signature: ["that", "was", "insane"],
   karaoke:   ["this", "is", "amazing"],
   hormozi:   ["you", "need", "this"],
   hype:      ["that", "was", "insane"],
@@ -52,9 +54,10 @@ function wordStyle(p, i, active) {
   return s;
 }
 
-function PresetCard({ preset, selected, onSelect }) {
+function PresetCard({ preset, selected, onSelect, fontFamily }) {
   const p = preset;
   const words = SAMPLES[p.category] || SAMPLES.karaoke;
+  const stacked = p.mode === "stack";
   /* The card is a fixed size, so preset px (a number on the 1080-wide output
      canvas) has to be scaled to it rather than used raw -- otherwise a 112px
      Hormozi preset would render at 112px in a 150px-wide tile. */
@@ -66,6 +69,8 @@ function PresetCard({ preset, selected, onSelect }) {
     `fx-${p.effect}`,
     `mode-${p.mode}`,
     p.box === "line" ? "boxed" : "",
+    stacked ? "stacked" : "",
+    p.reveal ? "reveal" : "",
   ].join(" ");
 
   const stage = {
@@ -76,8 +81,15 @@ function PresetCard({ preset, selected, onSelect }) {
     background: p.box === "line" ? p.boxColor : undefined,
     /* Outline is the renderer's stroke width in output px; as a share of the
        font size it survives the scaling above. */
-    "--stroke": `${Math.min(0.09, (p.outline / p.px) * 0.9)}em`,
+    "--stroke": `${Math.min(0.09, ((p.textOutline ?? (p.box === "word" ? 0 : p.outline)) / p.px) * 0.9)}em`,
+    "--ink": p.outlineColor || "#000",
+    /* Hard offset shadow and halo, the two depth treatments the signature
+       looks are built on. Both collapse to nothing for every older preset. */
+    "--drop": p.shadowColor ? `${(p.shadow / p.px + 0.05).toFixed(3)}em` : "0",
+    "--drop-ink": p.shadowColor || "transparent",
+    "--halo": p.glow || "transparent",
     "--active": p.active,
+    fontFamily: fontFamily || undefined,
   };
 
   return (
@@ -92,8 +104,11 @@ function PresetCard({ preset, selected, onSelect }) {
               animating colour on a single span made every card twitch when the
               active word changed width under a scale effect. */}
           {words.map((w, i) => (
-            <span key={i} className="cap-word"
-                  style={{ "--i": i, "--n": words.length }}>
+            <span key={i}
+                  className={`cap-word ${stacked && i === words.length - 1 ? "big" : ""}`}
+                  style={{ "--i": i, "--n": words.length,
+                           ...(stacked && i < words.length - 1
+                             ? { fontSize: `${(p.stackSmall || 58) / 100}em` } : null) }}>
               <span className="cap-word-rest" style={wordStyle(p, i, false)}>{w}</span>
               <span className="cap-word-lit" style={wordStyle(p, i, true)}>{w}</span>
             </span>
@@ -110,7 +125,13 @@ export function useCaptionPresets() {
   useEffect(() => {
     let alive = true;
     getCaptionOptions()
-      .then((o) => { if (alive && o.presets?.length) setData(o); })
+      .then((o) => {
+        if (!alive || !o.presets?.length) return;
+        // Cards preview each preset in its own typeface, so the faces have to
+        // be declared wherever the picker is shown, not only inside the editor.
+        if (o.fonts) installFontFaces(o.fonts);
+        setData(o);
+      })
       .catch(() => {});
     return () => { alive = false; };
   }, []);
@@ -122,6 +143,10 @@ export default function CaptionPresetPicker({ value, onChange, data }) {
 
   const presets = data?.presets || [];
   const categories = data?.categories || [];
+  const families = useMemo(
+    () => Object.fromEntries((data?.fonts || []).map((f) => [f.id, `'${f.family}', sans-serif`])),
+    [data],
+  );
 
   /* Open on the category the current preset belongs to, so re-entering the
      editor shows you where you already are instead of resetting to the first
@@ -157,7 +182,7 @@ export default function CaptionPresetPicker({ value, onChange, data }) {
       <div className="cap-grid">
         {shown.map((p) => (
           <PresetCard key={p.id} preset={p} selected={p.id === value}
-                      onSelect={onChange} />
+                      onSelect={onChange} fontFamily={families[p.font]} />
         ))}
       </div>
     </div>

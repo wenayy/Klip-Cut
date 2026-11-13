@@ -19,7 +19,10 @@ function ModalPlanCard({ plan, credits, yearly, perClip, busy, current, onCredit
           <strong>{plan.name}</strong>
           <span>{credits.toLocaleString()} credits every month</span>
         </div>
-        <div className="quick-price"><strong>${price}</strong><span>/month</span></div>
+        <div className="quick-price">
+          <strong>${price}</strong><span>/month</span>
+          {yearly && <small className="plan-billed">billed ${(price * 12).toLocaleString()}/year</small>}
+        </div>
       </div>
 
       <div className="billing-toggle" role="group" aria-label="Billing interval">
@@ -271,6 +274,11 @@ export default function Pricing({ user, onRequireAuth, modal = false, onClose, o
                   <strong>${price}</strong>
                   <span>{free ? "" : "/month"}</span>
                 </div>
+                {!free && (
+                  <p className="plan-billed">
+                    {yearly ? `Billed yearly · $${(price * 12).toLocaleString()}/year` : "Billed monthly · cancel anytime"}
+                  </p>
+                )}
                 {tiers.length > 0 ? (
                   <div className="credit-picker" role="group" aria-label={`Credits per month on ${plan.name}`}>
                     <span className="credit-picker-label">Monthly credits</span>

@@ -28,6 +28,9 @@ STORAGE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sto
 JOB_FIELDS = {
     "status", "progress_message", "percent", "error",
     "transcript", "source_duration",
+    # Written once more after creation, when analysis has worked out what kind
+    # of video this is -- see the genre note in main._run_pipeline_locked.
+    "options",
 }
 
 

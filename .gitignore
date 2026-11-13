@@ -48,3 +48,6 @@ resume.tex
 memory/
 test_reports/
 
+
+# local test footage (never commit)
+testdata/

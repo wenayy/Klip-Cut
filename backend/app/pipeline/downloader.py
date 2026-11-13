@@ -644,10 +644,43 @@ def download_video(url: str, out_path: str, on_progress=None,
 
 
 def extract_audio(video_path: str, out_path: str) -> str:
+    """Extracts a mono 16 kHz MP3 track.
+
+    A video with no audio stream is not an error any more: gameplay captures and
+    screen recordings routinely have none, and `ffmpeg -vn` on them fails with
+    "Output file does not contain any stream". Write the matching duration of
+    silence instead, so every downstream step still has a file to open.
+    """
+    try:
+        has_audio = bool(subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=index", "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip())
+    except (subprocess.SubprocessError, OSError):
+        has_audio = True
+
+    if has_audio:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", video_path, "-vn", "-ac", "1", "-ar", "16000",
+             "-acodec", "libmp3lame", out_path],
+            check=True,
+            capture_output=True,
+        )
+        return out_path
+
+    try:
+        duration = float(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip().splitlines()[0])
+    except (subprocess.SubprocessError, OSError, ValueError, IndexError):
+        duration = 60.0
+    print("[clipper] source has no audio stream; writing silence for analysis")
     subprocess.run(
-        ["ffmpeg", "-y", "-i", video_path, "-vn", "-ac", "1", "-ar", "16000",
-         "-acodec", "libmp3lame", out_path],
-        check=True,
-        capture_output=True,
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+         "-t", str(max(1.0, duration)), "-acodec", "libmp3lame", out_path],
+        check=True, capture_output=True,
     )
     return out_path

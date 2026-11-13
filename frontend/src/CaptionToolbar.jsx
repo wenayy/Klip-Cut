@@ -11,7 +11,7 @@ export const FONT_LIST = [
 /* Declares @font-face for every server font, pointing at the server's own ttf.
    The preview then uses the exact file the renderer burns in, instead of a
    similarly-named webfont that kerns differently. */
-function installFontFaces(fonts) {
+export function installFontFaces(fonts) {
   const id = "clipper-font-faces";
   if (document.getElementById(id)) return;
   const el = document.createElement("style");

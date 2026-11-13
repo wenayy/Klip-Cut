@@ -33,6 +33,13 @@ from app.models import CreditLedger, User, _iso_utc
 # actually receive, which is the whole point -- see the module docstring.
 CREDITS_PER_CLIP = 10
 
+# What an admin's balance reads as. Admin accounts are for testing the product
+# without the product's economics in the way -- the owner needs to render a
+# hundred clips from their own account and still see the Pro output (no
+# watermark, pause tightening, every template) while doing it. Real customers
+# are metered exactly as before; nothing about this touches them.
+UNLIMITED_CREDITS = 1_000_000_000
+
 # The floor for having "any credit at all", used to reject a job before it
 # starts. One clip is the smallest thing anyone can ask for.
 MIN_CHARGE = CREDITS_PER_CLIP
@@ -356,7 +363,11 @@ def get_tier(plan_id: str, credits: int) -> dict:
 def balance(user_id: str) -> int:
     with SessionLocal() as session:
         user = session.get(User, user_id)
-        return user.credits if user else 0
+        if not user:
+            return 0
+        if is_admin(user.email):
+            return UNLIMITED_CREDITS
+        return user.credits
 
 
 def charge(user_id: str, amount: int, job_id: str = None, note: str = "") -> bool:
@@ -370,7 +381,14 @@ def charge(user_id: str, amount: int, job_id: str = None, note: str = "") -> boo
 
     with SessionLocal() as session:
         user = session.get(User, user_id)
-        if not user or user.credits < amount:
+        if not user:
+            return False
+        # Admin testing is not metered. Writing a ledger row that says otherwise
+        # would make the history of an owner account look like a customer's and
+        # hide the exact flow the ledger exists to show.
+        if is_admin(user.email):
+            return True
+        if user.credits < amount:
             return False
         user.credits -= amount
         session.add(CreditLedger(user_id=user_id, delta=-amount,
@@ -393,7 +411,7 @@ def refund(user_id: str, amount: int, job_id: str = None) -> bool:
         return False
     with SessionLocal() as session:
         user = session.get(User, user_id)
-        if not user:
+        if not user or is_admin(user.email):
             return False
         user.credits += amount
         session.add(CreditLedger(user_id=user_id, delta=amount,

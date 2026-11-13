@@ -63,3 +63,40 @@ def test_pick_clips_returns_highest_score_first(monkeypatch):
 
     assert [item["score"] for item in result] == [9.4, 8.1, 6.2]
 
+
+
+def test_every_genre_weighs_the_same_six_axes_to_one():
+    for name, profile in analyzer.GENRES.items():
+        assert set(profile["weights"]) == set(analyzer.WEIGHTS), name
+        assert abs(sum(profile["weights"].values()) - 1.0) < 1e-9, name
+
+
+def test_unknown_genre_falls_back_to_the_general_rubric():
+    assert analyzer.genre_profile("") is analyzer.GENRES["general"]
+    assert analyzer.genre_profile("cooking") is analyzer.GENRES["general"]
+    assert analyzer.genre_profile("Gaming") is analyzer.GENRES["gaming"]
+
+
+def test_genre_changes_the_score_not_the_contract(monkeypatch):
+    reply = {"candidates": [{
+        "start_index": 0, "end_index": 1, "title": "t", "hook": "h",
+        "scores": {"hook": 6, "standalone": 2, "emotion": 10,
+                   "ending": 6, "payoff": 6, "share": 6},
+    }]}
+    prompts = []
+
+    def fake_chat(prompt, **kw):
+        prompts.append(prompt)
+        return reply
+
+    monkeypatch.setattr(analyzer, "_openai_chat", fake_chat)
+    utterances = [{"start": i * 5.0, "end": i * 5.0 + 4, "transcript": f"line {i}",
+                   "words": []} for i in range(3)]
+    general = analyzer._collect_candidates(utterances)[0]
+    gaming = analyzer._collect_candidates(utterances, genre="gaming")[0]
+    # A loud moment nobody can follow is a weak general clip and a strong
+    # gameplay one; the range it points at is the same either way.
+    assert gaming["score"] > general["score"]
+    assert (gaming["start_index"], gaming["end_index"]) == (0, 1)
+    assert "GAMEPLAY WITH COMMENTARY" in prompts[1]
+    assert "GAMEPLAY WITH COMMENTARY" not in prompts[0]

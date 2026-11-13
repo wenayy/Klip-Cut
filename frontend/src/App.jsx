@@ -155,6 +155,12 @@ function downloadName(title, index) {
   return `${cleaned || `clip_${index + 1}`}.mp4`;
 }
 
+/* True when the model scored this clip; highlights picked from sound and motion
+   carry an empty scores object. */
+function hasScores(clip) {
+  return Boolean(clip.scores && Object.keys(clip.scores).length);
+}
+
 function fmtDuration(seconds) {
   const s = Math.max(0, Math.round(seconds));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -329,6 +335,14 @@ function ProcessingStudio({ job, startedAt, onCancel }) {
 // source fills the frame; the caption picker in Preferences decides the words.
 const TEMPLATES = [
   {
+    /* The default. A creator pasting a link rarely knows or cares which of the
+       other six is "right"; the pipeline can look at the footage and decide, and
+       every existing template is still one click away as an override. */
+    id: "auto", name: "Auto", frame: "auto", scene: "scene-black",
+    words: ["Here", "is", "your"], color: "#d8f24e", capClass: "cap-classic",
+    note: "Detects podcast, gameplay, facecam",
+  },
+  {
     id: "classic", name: "Classic", frame: "blur", scene: "scene-neutral",
     words: ["Here", "is", "your"], color: "#d8f24e", capClass: "cap-classic",
     note: "Full video · soft background",
@@ -349,9 +363,9 @@ const TEMPLATES = [
     note: "Fill frame · warm crop",
   },
   {
-    id: "gameplay", name: "Gameplay", frame: "gameplay", scene: "scene-sunset",
+    id: "gameplay", name: "Split screen", frame: "gameplay", scene: "scene-sunset",
     words: ["HERE", "IS", "YOUR"], color: "#3ad43a", capClass: "cap-gameplay",
-    pop: true, note: "Video and gameplay split",
+    pop: true, note: "Talking head over a gameplay loop",
   },
   {
     id: "podcast", name: "Podcast", frame: "podcast", scene: "scene-studio",
@@ -373,8 +387,12 @@ function TemplatePreview({ template }) {
      the band -- which meant changing how much of the frame the video gets
      changed nothing visible here. */
   const isBlur = template.frame === "blur";
+  /* Auto is not one composition: it is the choice between them. The card shows
+     the gaming stack -- gameplay, webcam, caption band -- because that is the
+     one no other card on the row depicts. */
+  const isAuto = template.frame === "auto";
   return (
-    <span className={`tpl-frame ${isSplit ? "is-split" : ""} ${isPodcast ? "is-podcast" : ""} ${isBlur ? "is-blur" : ""} ${template.scene}`}>
+    <span className={`tpl-frame ${isSplit ? "is-split" : ""} ${isPodcast ? "is-podcast" : ""} ${isBlur ? "is-blur" : ""} ${isAuto ? "is-auto" : ""} ${template.scene}`}>
       <span className="tpl-scene" aria-hidden="true">
         <span className="tpl-head" />
         <span className="tpl-body" />
@@ -386,6 +404,13 @@ function TemplatePreview({ template }) {
           <span className="tpl-game-lane" />
           <span className="tpl-game-lane" />
           <span className="tpl-game-player" />
+        </span>
+      )}
+      {isAuto && (
+        <span className="tpl-auto" aria-hidden="true">
+          <span className="tpl-auto-game"><i /><i /></span>
+          <span className="tpl-auto-cam"><b /></span>
+          <span className="tpl-auto-caption"><i /><i /></span>
         </span>
       )}
     </span>
@@ -539,10 +564,13 @@ export default function App() {
   const [burnTitle, setBurnTitle] = useState(true);
   const [autoCensor, setAutoCensor] = useState(true);
   const [multilingual, setMultilingual] = useState(false);
-  const [template, setTemplate] = useState("classic");
-  const [captionStyle, setCaptionStyle] = useState("karaoke_fill");
+  const [template, setTemplate] = useState("auto");
+  const [captionStyle, setCaptionStyle] = useState("pro_caps");
   const [ratio, setRatio] = useState("9:16");
   const [lengthPref, setLengthPref] = useState("any");
+  /* What kind of video this is. "auto" lets the server decide from the title
+     and how much of the runtime is speech; naming it picks the rubric outright. */
+  const [genre, setGenre] = useState("auto");
   const [intent, setIntent] = useState("");
   const [tightenPauses, setTightenPauses] = useState(false);
   /* Paid extras. Both default off: the cheaper path is what every job has
@@ -604,6 +632,20 @@ export default function App() {
     if (window.history.state?.klipcutView) window.history.back();
     else showAppView(null, false);
   }
+
+  /* A refresh, or a shared #clips / #studio link, used to drop the user on the
+     marketing page: views were restored from history.state only, which a fresh
+     page load does not have. Restore from the hash once the session is known. */
+  const restoredFromHash = useRef(false);
+  useEffect(() => {
+    if (!user || restoredFromHash.current) return;
+    restoredFromHash.current = true;
+    const view = { "#clips": "dashboard", "#studio": "studio" }[window.location.hash];
+    if (!view) return;
+    window.history.replaceState({ ...window.history.state, klipcutView: view }, "",
+                                window.location.hash);
+    showAppView(view, false);
+  }, [user]);
 
   useEffect(() => {
     function restoreView() {
@@ -944,6 +986,7 @@ export default function App() {
         captionStyle,
         ratio,
         lengthPref,
+        genre,
         intent: intent.trim(),
         highQuality,
         advancedModel,
@@ -964,6 +1007,7 @@ export default function App() {
             caption_style: options.captionStyle,
             ratio: options.ratio,
             length_pref: options.lengthPref,
+            genre: options.genre,
             intent: options.intent,
             high_quality: options.highQuality,
             advanced_model: options.advancedModel,
@@ -1100,6 +1144,14 @@ export default function App() {
                  the account menu -- five separate nav buttons wrapped onto two
                  lines as soon as the bar shrank on scroll. */
               <div className="account" ref={accountRef}>
+                {/* The way back to your own clips. It used to live only behind
+                    the avatar menu and the credit pill, so a returning user
+                    landed on the marketing page with no visible route to
+                    their work. */}
+                <button className="btn btn-ghost btn-sm nav-myclips"
+                        onClick={() => showAppView("dashboard")}>
+                  My clips
+                </button>
                 <button
                   className="credit-pill"
                   onClick={() => showAppView("dashboard")}
@@ -1170,7 +1222,7 @@ export default function App() {
           <div className="container hero-inner">
             <span className="hero-badge rise r0">
               <span className="badge-dot" aria-hidden="true" />
-              AI clipping studio — free while in beta
+              AI clipping studio — start free, no card needed
             </span>
 
             <h1 className="hero-title" aria-label="Turn any video into clips that go viral.">
@@ -1384,8 +1436,8 @@ export default function App() {
         {/* ---------- Comparison ---------- */}
         <section className="container" id="compare">
           <div className="section-head reveal">
-            <span className="section-eyebrow lime">How we compare</span>
-            <h2 className="section-title light">
+            <span className="section-eyebrow">How we compare</span>
+            <h2 className="section-title">
               The same clips,
               <br />
               <em className="serif">on your terms.</em>
@@ -1394,7 +1446,7 @@ export default function App() {
           <div className="reveal" style={{ overflowX: "auto" }}>
             <table style={{
               width: "100%", borderCollapse: "collapse", minWidth: "520px",
-              fontSize: "15px", color: "rgba(255,255,255,0.86)",
+              fontSize: "15px", color: "var(--ink)",
             }}>
               <thead>
                 <tr>
@@ -1402,8 +1454,8 @@ export default function App() {
                     <th key={h || "feat"} style={{
                       textAlign: i === 0 ? "left" : "center", padding: "14px 16px",
                       fontWeight: 600,
-                      color: i === 1 ? "#a78bfa" : "rgba(255,255,255,0.6)",
-                      borderBottom: "1px solid rgba(255,255,255,0.12)",
+                      color: i === 1 ? "var(--violet)" : "var(--ink-faint)",
+                      borderBottom: "1px solid var(--line)",
                     }}>{h}</th>
                   ))}
                 </tr>
@@ -1421,13 +1473,13 @@ export default function App() {
                     {row.map((cell, c) => (
                       <td key={c} style={{
                         textAlign: c === 0 ? "left" : "center", padding: "14px 16px",
-                        borderBottom: "1px solid rgba(255,255,255,0.06)",
-                        color: c === 0 ? "rgba(255,255,255,0.8)" : "inherit",
-                        background: c === 1 ? "rgba(167,139,250,0.06)" : "transparent",
+                        borderBottom: "1px solid var(--line)",
+                        color: c === 0 ? "var(--ink-soft)" : "inherit",
+                        background: c === 1 ? "rgba(109,40,217,0.06)" : "transparent",
                       }}>
                         {c === 0 ? cell : (cell
-                          ? <span style={{ color: "#4ade80", fontWeight: 700 }}>✓</span>
-                          : <span style={{ color: "rgba(255,255,255,0.25)" }}>—</span>)}
+                          ? <span style={{ color: "var(--success)", fontWeight: 700 }} aria-label="Yes">✓</span>
+                          : <span style={{ color: "var(--ink-faint)" }} aria-label="No">—</span>)}
                       </td>
                     ))}
                   </tr>
@@ -1435,7 +1487,7 @@ export default function App() {
               </tbody>
             </table>
             <p style={{
-              marginTop: "14px", fontSize: "13px", color: "rgba(255,255,255,0.45)",
+              marginTop: "14px", fontSize: "13px", color: "var(--ink-faint)",
             }}>
               Comparison based on publicly listed features as of 2026. Names belong to their owners.
             </p>
@@ -1528,6 +1580,13 @@ export default function App() {
             </span>
             KlipCut
           </span>
+          <nav className="footer-links" aria-label="Footer">
+            <a href="#how">How it works</a>
+            <a href="#features">Features</a>
+            <a href="#compare">Compare</a>
+            <a href="#pricing">Pricing</a>
+            <a href="#faq">FAQ</a>
+          </nav>
           <span className="footer-note">Built for creators who publish often.</span>
         </div>
       </footer>
@@ -1570,6 +1629,7 @@ export default function App() {
                 }}
                 prefs={{
                   nClips, setNClips, ratio, setRatio, lengthPref, setLengthPref,
+                  genre, setGenre,
                   burnSubtitles, setBurnSubtitles, burnTitle, setBurnTitle,
                   autoCensor, setAutoCensor,
                   multilingual, setMultilingual, tightenPauses, setTightenPauses,
@@ -1649,10 +1709,22 @@ export default function App() {
                         beside the title rather than under six progress bars. */}
                     <div className="clip-headline">
                       <div>
-                        <h3 className="clip-title">{clip.title}</h3>
-                        <p className="clip-hook">{clip.hook}</p>
+                        {/* Highlights found from motion and sound (silent
+                            gameplay) have no title or hook -- there was nothing
+                            to read. Say what they are instead of an empty card. */}
+                        <h3 className="clip-title">
+                          {clip.title || `Action highlight · ${fmtDuration(clip.start || 0)}`}
+                        </h3>
+                        <p className="clip-hook">
+                          {clip.hook || (!hasScores(clip)
+                            ? "Picked from the action itself: the sharpest burst of sound and motion in the video."
+                            : "")}
+                        </p>
                       </div>
-                      {clip.score != null && (
+                      {/* The number is the model's judgement of the moment. A
+                          clip it never judged (a sound-and-motion highlight)
+                          gets no number rather than an invented one. */}
+                      {clip.score != null && hasScores(clip) && (
                         <div className="clip-score-badge" title="Virality score">
                           <strong>{clip.score.toFixed(1)}</strong>
                           <span>Virality</span>
@@ -1660,7 +1732,7 @@ export default function App() {
                       )}
                     </div>
 
-                    {clip.scores && (
+                    {hasScores(clip) && (
                       <div className="clip-scores">
                         <div className="scores-head">
                           <span>Why this one</span>

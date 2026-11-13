@@ -9,6 +9,8 @@ from app import env  # noqa: F401  -- ensures .env is loaded
 
 import os
 
+import time
+
 import requests
 
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY")
@@ -49,8 +51,12 @@ _DEFAULT = {"model": "nova-2", "detect_language": "true"}
 _MULTILINGUAL = ({"model": "nova-3", "language": "multi"}, _DEFAULT)
 
 
+# Network attempts per Deepgram request before the job is failed.
+UPLOAD_ATTEMPTS = 3
+
+
 def transcribe(audio_path: str, multilingual: bool = False,
-               diarize: bool = False) -> dict:
+               diarize: bool = False, keyterms: list = None) -> dict:
     """Transcribe with word-level timings.
 
     `multilingual` opts into the pricier model that handles code-switching.
@@ -68,16 +74,46 @@ def transcribe(audio_path: str, multilingual: bool = False,
 
     last = None
     for i, choice in enumerate(attempts):
-        resp = requests.post(
-            "https://api.deepgram.com/v1/listen",
-            params={**params, **choice},
-            headers={
-                "Authorization": f"Token {DEEPGRAM_API_KEY}",
-                "Content-Type": "audio/mp3",
-            },
-            data=audio,
-            timeout=300,
-        )
+        request_params = {**params, **choice}
+        # Keyterm boosting is nova-3 only. The 100 most useful Hinglish words
+        # plus the title are enough to make nova-3 spell "bahut" as "bahut"
+        # rather than inventing a Devanagari word that romanises into nonsense.
+        if keyterms and choice.get("model") == "nova-3":
+            request_params["keyterm"] = list(keyterms)[:100]
+
+        def _post(payload):
+            # A long source is tens of MB in one request, and one stalled
+            # upload used to fail the whole job ("The write operation timed
+            # out"). A network failure means Deepgram never received the
+            # audio, so retrying cannot bill twice; HTTP errors are not retried
+            # here -- they are answers, handled below.
+            for attempt in range(UPLOAD_ATTEMPTS):
+                try:
+                    return requests.post(
+                        "https://api.deepgram.com/v1/listen",
+                        params=payload,
+                        headers={
+                            "Authorization": f"Token {DEEPGRAM_API_KEY}",
+                            "Content-Type": "audio/mp3",
+                        },
+                        data=audio,
+                        timeout=(30, 600),
+                    )
+                except (requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout) as exc:
+                    if attempt == UPLOAD_ATTEMPTS - 1:
+                        raise
+                    wait = 5 * (attempt + 1) ** 2
+                    print(f"[clipper] Deepgram upload failed "
+                          f"({exc.__class__.__name__}); retrying in {wait}s")
+                    time.sleep(wait)
+
+        resp = _post(request_params)
+        if resp.status_code == 400 and "keyterm" in request_params:
+            # Older nova-3 deployments reject the parameter outright. Boosting
+            # is an improvement, not a dependency.
+            request_params.pop("keyterm", None)
+            resp = _post(request_params)
         if resp.status_code in (401, 403):
             # A key problem is not a model problem -- retrying the fallback
             # would just spend another request to be told the same thing.

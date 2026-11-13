@@ -21,6 +21,8 @@ short-form editors actually ship:
                    phrase     -- 2-3 words at a time, replaced wholesale
                                  (the Hormozi/MrBeast cadence)
                    typewriter -- characters appear one at a time
+                   stack      -- two lines: the lead-in small on top, the last
+                                 word huge underneath in the accent colour
   active_effect  how the spoken word is marked (see ACTIVE_EFFECTS)
   entrance       how a cue arrives (folded in from the old separate control)
   position       where the block sits
@@ -64,6 +66,14 @@ BOX_EFFECTS = {"marker"}
 ENTRANCES = ("none", "fade", "pop", "riseup", "punch", "bounce")
 
 CATEGORIES = [
+    # The designed looks. Every family below this one varies a single axis of the
+    # same white Arial caption; these each pick a typeface, a depth treatment and
+    # a cadence together, which is what makes a caption read as a *style*.
+    {"id": "signature", "name": "Signature", "desc": "Designed looks: type, depth and motion together"},
+    # First because it is the default family: the four house looks below are
+    # complete recipes, not palette swaps, and they are what most people should
+    # start from.
+    {"id": "pro",       "name": "Pro",       "desc": "House looks: glow, pop, chip, soft"},
     {"id": "karaoke",   "name": "Karaoke",   "desc": "Word-by-word, follows the voice"},
     {"id": "hormozi",   "name": "Hormozi",   "desc": "Big caps, a few words at a time"},
     {"id": "hype",      "name": "Hype",      "desc": "Loud, fast, for gaming and reactions"},
@@ -93,6 +103,10 @@ MAGENTA = "&H00E060D0"
 CREAM = "&H00E8F0F5"
 BLUE = "&H00F66C2B"
 PURPLE = "&H00F04080"
+BLACK = "&H00000000"
+HOT_PINK = "&H009314FF"
+ELECTRIC = "&H00FFE100"  # electric cyan
+VIOLET = "&H00F65C8B"
 
 # Defaults every preset inherits, so an entry only states what is unusual about
 # it. Without this each preset was 12 near-identical lines and the differences
@@ -118,6 +132,25 @@ DEFAULTS = {
     "spacing": 0,
     "category": "karaoke",
     "legacy": False,
+    # --- depth and emphasis -------------------------------------------------
+    # All optional, all off by default, so every preset written before these
+    # existed renders exactly as it did.
+    # Slug of a shipped face in assets/fonts (see subtitles.FONTS). Preferred
+    # over `font`, which is a raw family name the editor cannot preview.
+    "font_id": None,
+    "outline_color": None,   # stroke colour; None = black
+    # A hard, opaque offset shadow is what gives comic/sticker type its depth.
+    # None keeps the soft translucent black every older preset shipped with.
+    "shadow_color": None,
+    "keyword_scale": 100,    # keywords drawn larger than the words around them
+    "glow": None,            # colour of a blurred halo under the WHOLE caption
+    # Words stay hidden until they are spoken. The layout is computed from the
+    # full cue, so nothing reflows as the line fills in.
+    "reveal": False,
+    "stack_small": 58,       # stack mode: size of the top line, % of the bottom
+    # With box="word": stroke the text and draw the chip on a layer underneath,
+    # so words that are NOT being spoken stay readable over a bright frame.
+    "text_outline": None,
 }
 
 
@@ -145,8 +178,89 @@ _LIST = [
     _p("gameplay", "Gameplay", "hype", size=84, active=GREEN, outline=6,
        uppercase=True, active_scale=118, keyword="&H0000D4FF", legacy=True),
 
+    # -- signature: one designed look per job to be done -----------------------
+    # Each of these fixes a typeface, a depth treatment (hard shadow, coloured
+    # stroke or halo) and a cadence together. They are grouped by what the clip
+    # IS -- gameplay, podcast, story -- because that is how people choose, and
+    # the first three of each kind are what Auto reaches for by genre.
+    #
+    # Gameplay: loud, fast, reads over a busy frame.
+    _p("sig_beast", "Beast", "signature",
+       font_id="bangers", size=134, uppercase=True, base=W, active=YELLOW,
+       outline=9, shadow=7, shadow_color=BLACK, keyword=GREEN,
+       keyword_scale=118, active_effect="pop", entrance="punch", max_words=3,
+       spacing=2),
+    _p("sig_clutch", "Clutch", "signature",
+       font_id="anton", size=130, uppercase=True, base=W, active=RED,
+       outline=8, shadow=6, shadow_color=BLACK, keyword=YELLOW,
+       keyword_scale=122, active_effect="scale", active_scale=116,
+       entrance="punch", max_words=3, rotate=2, spacing=1),
+    _p("sig_arcade", "Arcade", "signature",
+       font_id="bungee", size=110, uppercase=True, base=W, active=ELECTRIC,
+       outline=6, glow=HOT_PINK, keyword=HOT_PINK, active_effect="pop",
+       entrance="pop", max_words=3),
+    _p("sig_wordpop", "Word Pop", "signature",
+       font_id="lilitaone", size=124, uppercase=True, base=W, active=LIME,
+       outline=10, shadow=5, shadow_color=BLACK, keyword=YELLOW,
+       active_effect="pop", reveal=True, max_words=3, position="middle"),
+    _p("sig_comic", "Comic", "signature",
+       font_id="bangers", size=138, uppercase=True, base=YELLOW, active=W,
+       outline=9, shadow=8, shadow_color=RED, keyword=W, keyword_scale=114,
+       mode="phrase", entrance="punch", max_words=3, rotate=-3, spacing=2),
+    # Podcast and talking head: the point of the line, readable at a glance.
+    _p("sig_mogul", "Mogul", "signature",
+       font_id="anton", size=150, uppercase=True, base=W, active=YELLOW,
+       outline=8, shadow=5, shadow_color=BLACK, keyword=YELLOW,
+       mode="stack", active_effect="pop", reveal=True, max_words=4,
+       position="middle", spacing=1),
+    _p("sig_deepdive", "Deep Dive", "signature",
+       font_id="poppins", size=82, base=W, active=W, outline=12,
+       text_outline=4, shadow=3, box="word", box_color=VIOLET, active_effect="marker", keyword=W,
+       entrance="fade", max_words=5, position="lower"),
+    _p("sig_podpro", "Pod Pro", "signature",
+       font_id="poppins", size=84, base=W, active=YELLOW, outline=6,
+       shadow=4, shadow_color=BLACK, keyword=YELLOW, keyword_scale=110,
+       active_effect="color", entrance="fade", max_words=5, position="lower"),
+    _p("sig_bubble", "Bubble", "signature",
+       font_id="titanone", size=102, base=W, active=YELLOW, outline=10,
+       outline_color=VIOLET, shadow=6, shadow_color="&H00501830",
+       keyword=YELLOW, active_effect="pop", entrance="bounce", max_words=3),
+    _p("sig_neon", "Neon Tube", "signature",
+       font_id="archivoblack", size=96, uppercase=True, base=W,
+       active=W, outline=4, outline_color="&H00D08000", glow=ELECTRIC,
+       keyword=ELECTRIC, active_effect="scale", active_scale=114,
+       entrance="fade", max_words=3),
+
+    # -- pro: the house looks, modelled on what KeyMo and OpusClip ship ----
+    # These are not another palette. Each one is a complete recipe -- size,
+    # weight, effect and cadence -- because that is what the reference styles
+    # are, and rebuilding them from separate colour/size/effect menus is how
+    # you end up with a caption that is 90% of the way to none of them.
+    # The reference style: all caps, heavy white type, thick black outline and
+    # the spoken word filled in the light blue KeyMo/Opus use. Sentence case
+    # reads as "podcast"; this reads as short-form.
+    _p("pro_caps", "Pro Caps", "pro",
+       font="Archivo Black", font_id="archivoblack", size=92,
+       uppercase=True, base=W,
+       active="&H00FF9B5A", outline=7, shadow=2,
+       active_effect="color", entrance="fade", max_words=2,
+       keyword="&H00FF9B5A"),
+    _p("pro_glow", "Pro Glow", "pro",
+       size=88, base=W, active=CYAN, outline=4, shadow=2,
+       active_effect="glow", entrance="fade", max_words=4, keyword=YELLOW),
+    _p("pro_pop", "Pro Pop", "pro",
+       size=90, uppercase=True, base=W, active=YELLOW, outline=6,
+       active_effect="pop", entrance="punch", max_words=3, keyword=YELLOW),
+    _p("pro_chip", "Pro Chip", "pro",
+       size=84, uppercase=True, base=W, active=INK, outline=16,
+       box="word", box_color=YELLOW, active_effect="marker",
+       entrance="fade", max_words=4, keyword=YELLOW),
+    _p("pro_soft", "Pro Soft", "pro",
+       size=80, base=CREAM, active=YELLOW, outline=3, shadow=4,
+       active_effect="color", entrance="fade", max_words=6, position="lower"),
+
     # -- karaoke: one family, seven ways of marking the spoken word --------
-    _p("karaoke_fill", "Fill", "karaoke",
+    _p("karaoke_fill", "Fill", "karaoke", size=84,
        active=LIME, active_effect="color", entrance="fade"),
     _p("karaoke_grow", "Grow", "karaoke",
        active=LIME, active_effect="scale", active_scale=115, entrance="fade"),
@@ -203,7 +317,7 @@ _LIST = [
     # bar. The frame is face-aware now and fills the canvas, so captions land on
     # a bookshelf or a lit face instead -- unoutlined cream on that is mush.
     _p("podcast_clean", "Podcast Clean", "podcast",
-       size=72, base=CREAM, active=CREAM, outline=4, shadow=3,
+       size=78, base=CREAM, active=CREAM, outline=4, shadow=3,
        active_effect="color", entrance="fade", max_words=6, position="lower"),
     _p("podcast_bold", "Podcast Bold", "podcast",
        size=74, base=W, active=W, outline=3, shadow=3,
@@ -380,7 +494,18 @@ def web_presets() -> dict:
             "entrance": p["entrance"],
             "activeScale": p["active_scale"],
             "maxWords": p["max_words"],
+            "reveal": bool(p.get("reveal")),
             "position": p["position"],
+            # Depth and emphasis. `font` is a slug the editor resolves against
+            # the served font list, so a preset previews in its own typeface.
+            "font": p["font_id"],
+            "outlineColor": ass_to_css(p["outline_color"]) if p["outline_color"] else None,
+            "shadowColor": ass_to_css(p["shadow_color"]) if p["shadow_color"] else None,
+            "keywordScale": p["keyword_scale"],
+            "glow": ass_to_css(p["glow"]) if p["glow"] else None,
+            "reveal": p["reveal"],
+            "stackSmall": p["stack_small"],
+            "textOutline": p["text_outline"],
         })
     return {
         "categories": CATEGORIES,

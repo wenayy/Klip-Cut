@@ -36,7 +36,7 @@ function authHeaders() {
 }
 
 
-export async function submitJob({ url, nClips, mode, burnSubtitles, burnTitle, autoCensor, multilingual, tightenPauses, voice, language, template, captionStyle, ratio, lengthPref, intent, highQuality, advancedModel, turnstileToken }) {
+export async function submitJob({ url, nClips, mode, burnSubtitles, burnTitle, autoCensor, multilingual, tightenPauses, voice, language, template, captionStyle, ratio, lengthPref, genre, intent, highQuality, advancedModel, turnstileToken }) {
   const resp = await fetch(`${API_BASE}/jobs`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -55,6 +55,7 @@ export async function submitJob({ url, nClips, mode, burnSubtitles, burnTitle, a
       caption_style: captionStyle,
       ratio,
       length_pref: lengthPref,
+      genre: genre || "auto",
       intent,
       high_quality: highQuality === true,
       advanced_model: advancedModel === true,
@@ -139,8 +140,16 @@ export async function getSourcePreview(url, signal) {
 /* Face-aware crop windows for a podcast clip, so the editor previews the
    composition the clip was actually rendered in. Returns {plan: null} for every
    other template, and whenever detection found nothing to track. */
-export async function getClipReframe(jobId, index, start, end) {
-  const q = start != null && end != null ? `?start=${start}&end=${end}` : "";
+export async function getClipReframe(jobId, index, start, end, template, autoZoom, autoBroll) {
+  const params = new URLSearchParams();
+  if (start != null && end != null) {
+    params.set("start", start);
+    params.set("end", end);
+  }
+  if (template) params.set("template", template);
+  if (autoZoom) params.set("auto_zoom", "1");
+  if (autoBroll === false) params.set("auto_broll", "0");
+  const q = params.toString() ? `?${params}` : "";
   const resp = await fetch(`${API_BASE}/jobs/${jobId}/reframe/${index}${q}`);
   if (!resp.ok) return { plan: null };
   return resp.json();

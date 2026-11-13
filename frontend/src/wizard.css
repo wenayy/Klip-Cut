@@ -684,3 +684,24 @@ html[data-theme="dark"] .share-foot { background: #191922; }
   font-variant-numeric: tabular-nums;
   color: var(--ink);
 }
+
+/* Phones: the layout picker used a 158px minimum column, which on a 390px
+   screen leaves room for one card -- seven phone-sized previews stacked into
+   about seven screens of scrolling before the caption styles and the Review
+   button. Three compact columns keep the whole choice in one view. */
+@media (max-width: 560px) {
+  .template-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .template-card { padding: 4px; gap: 4px; border-radius: 14px; }
+  .template-card .tpl-frame { border-radius: 10px; }
+  .template-name { font-size: 12px; }
+  .template-note { display: none; }
+}
+
+/* Same problem for caption styles: one 145px card per row on a phone made a
+   family of five looks a full screen of scrolling. Two per row. */
+@media (max-width: 560px) {
+  .caption-pref-group .cap-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

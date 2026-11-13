@@ -41,6 +41,15 @@ from app.pipeline import energy
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
+# Any OpenAI-compatible endpoint, so the analysis pass can run on a local model
+# (Ollama, LM Studio, vLLM, llama.cpp) instead of the hosted API. Same reason
+# the OpenShorts reference ships it: the moment picker is the only cloud call in
+# the clip pipeline, and a self-hosted deployment should be able to keep the
+# transcript and the footage on its own box too.
+OPENAI_BASE_URL = (os.environ.get("OPENAI_BASE_URL")
+                   or os.environ.get("CLIPPER_LLM_BASE_URL")
+                   or "https://api.openai.com/v1").rstrip("/")
+
 # ---------------------------------------------------------------------------
 # The two analysis tiers. Editorial judgement is the whole job here, so both
 # are plain model ids you can repoint from the environment without a deploy:
@@ -63,6 +72,15 @@ STANDARD_MODEL = (os.environ.get("CLIPPER_MODEL_STANDARD")
 # ADVANCED then means "no benefit", which is a disappointing upgrade but a
 # working one. A wrong id would fail every upgraded job outright.
 ADVANCED_MODEL = os.environ.get("CLIPPER_MODEL_ADVANCED") or STANDARD_MODEL
+
+# The bulk tier: reading EVERY transcript window (pass 1) and small chores like
+# picking caption emoji. This is the part whose cost grows with the length of
+# the source -- a 3-hour podcast is 13 windows whether you want 1 clip or 10 --
+# so it runs on a cheap model, and the judgement calls that decide what ships
+# (comparing finalists, refining the cut) stay on the job's own tier.
+#
+#   CLIPPER_MODEL_BULK=<id>        defaults to the standard model
+BULK_MODEL = os.environ.get("CLIPPER_MODEL_BULK") or STANDARD_MODEL
 
 # Retained under the old name because _openai_chat falls back to it, and
 # because "the model, unqualified" still means the one everyone gets.
@@ -95,6 +113,14 @@ def _selection_passes() -> int:
 
 SELECTION_PASSES = _selection_passes()
 
+# When the model cannot be reached at all -- a dead key, an outage, a local
+# server that is not running -- fall back to the mechanical speech-run picker
+# instead of failing a job that has already paid for transcription. Default on:
+# handing someone zero clips because a third party is down is the worse
+# failure. Set CLIPPER_LLM_FALLBACK=0 to make a bad key fail loudly instead.
+LLM_FALLBACK = os.environ.get("CLIPPER_LLM_FALLBACK", "1").strip().lower() \
+    not in ("0", "false", "no", "off")
+
 WINDOW_SIZE = 110              # utterances per window -- small enough to read closely
 WINDOW_OVERLAP = 20            # so moments spanning a boundary survive intact
 # High enough that small moments (a joke, a one-liner) get nominated alongside
@@ -125,9 +151,97 @@ WEIGHTS = {
     "ending": 0.16, "payoff": 0.12, "share": 0.08,
 }
 
+# ---------------------------------------------------------------------------
+# Genre profiles
+# ---------------------------------------------------------------------------
+# One rubric for every kind of video is why a gameplay VOD used to come back
+# with its three most articulate sentences instead of its three best moments:
+# the default prompt is written for people making a POINT, and a streamer's best
+# clip is usually four words and a scream. A profile changes two things and
+# nothing else -- what the model is told to hunt for, and how the same six
+# scores are weighed. The index-range contract, the windows and the
+# pool -> rank -> de-overlap shape are identical for all of them.
+PODCAST_BRIEF = """GENRE: PODCAST / INTERVIEW. The audience is here for VALUE -- something they can
+use, repeat or argue with tomorrow. Rank these shapes above everything else:
+- a contrarian or counter-intuitive claim, WITH the reasoning that makes it land
+- a concrete framework, rule or step-by-step someone could apply today
+- a specific number, result or example ("we went from 2 to 40 customers in a
+  month"), never a general principle
+- a story with a turn: what they believed, what happened, what changed
+- a quotable line said with conviction that would work as a caption on its own
+- an honest admission or failure most people in their position would hide
+Generic advice anyone could have said ("consistency is key", "just be
+yourself") is NOT value however confidently it is delivered -- score it low on
+hook and share.
+LENGTH FOLLOWS THE THOUGHT. A podcast clip is not a fixed 25-30 seconds. A
+claim with its reasoning or a story with its turn usually needs 40-90 seconds:
+take all of it, and never stop at the setup because the clip felt long. Only a
+moment that is genuinely complete in a sentence or two -- a one-liner, a sharp
+answer -- should be short. Start on the speaker's claim, not on the host's question,
+unless the question IS the hook. Never end on the host moving to the next topic.
+
+"""
+
+GAMING_BRIEF = """GENRE: GAMEPLAY WITH COMMENTARY. The transcript is the PLAYER talking over a
+game. The action itself is not in the text -- only their reaction to it. Read
+the prosody tags as the game: a LOUD / fast / dynamic burst after calm lines
+means something just happened on screen. Hunt for:
+- a clutch, a win or an insane play, and the scream that follows it
+- a fail, a death, a betrayal, a rage moment
+- a jump scare or genuine shock
+- a funny exchange with teammates or chat, a roast, a bit that escalates
+- a glitch, a discovery, a "wait, WHAT?" moment
+- a tense build-up that resolves: the last enemy, the final lap, the boss at 1 HP
+Gameplay clips are SHORT -- 12 to 40 seconds is normal. The reaction on its own
+is a fragment: always start several lines BEFORE the outburst so the viewer
+sees it coming, and end one or two lines after the peak, on the reaction rather
+than on the calm-down. Score `standalone` by whether someone who has never seen
+this game would still FEEL the moment, not by whether they follow the story.
+Calm narration, menu talk, sponsor reads and "what's up guys" intros are never
+clips.
+
+"""
+
+GENRES = {
+    # The original rubric, unchanged: what every job ran before genres existed.
+    "general": {"weights": WEIGHTS, "brief": "", "select": ""},
+    # Value over volume. Payoff and share rise because a podcast clip is judged
+    # by what the viewer walks away with; emotion falls because a calm, sharp
+    # insight routinely beats an excited nothing.
+    "podcast": {
+        "weights": {"hook": 0.24, "standalone": 0.20, "payoff": 0.18,
+                    "share": 0.14, "ending": 0.14, "emotion": 0.10},
+        "brief": PODCAST_BRIEF,
+        "select": ("This is a podcast or interview. Prefer the moments with the "
+                   "most concrete VALUE -- a specific claim, number, framework or "
+                   "story -- over ones that are merely well spoken.\n\n"),
+    },
+    # Feeling over sense. Standalone nearly drops out: nobody needs the plot of
+    # the mission to enjoy the car going off the cliff.
+    "gaming": {
+        "weights": {"emotion": 0.28, "hook": 0.26, "payoff": 0.16,
+                    "ending": 0.14, "share": 0.10, "standalone": 0.06},
+        "brief": GAMING_BRIEF,
+        "select": ("This is gameplay with commentary. Prefer the moments with the "
+                   "biggest genuine reaction -- a clutch, a fail, a scare, a laugh "
+                   "-- over ones that are merely well explained. Short is good.\n\n"),
+    },
+}
+
+
+def genre_profile(genre: str = "") -> dict:
+    """The profile for a genre name; anything unknown is the general rubric."""
+    return GENRES.get((genre or "").strip().lower(), GENRES["general"])
+
+
 FILLER_OPENERS = {
     "so", "and", "but", "um", "uh", "like", "yeah", "okay", "ok", "well",
-    "right", "you know", "i mean", "anyway", "then",
+    "right", "you know", "i mean", "anyway", "then", "honestly", "basically",
+    "actually", "literally",
+    # Hinglish discourse openers. A clip that starts on "yaar, honestly" has
+    # spent its first second saying nothing; the hook is the line after it.
+    "yaar", "bhai", "bro", "matlab", "toh", "acha", "achha", "haan",
+    "han", "na", "arre", "arey", "dekho", "suno", "bas", "ab", "ek",
 }
 
 
@@ -154,7 +268,7 @@ def _openai_chat(prompt: str, retries: int = 2, temperature: float = 0.4,
                 payload["temperature"] = temperature
 
             resp = requests.post(
-                "https://api.openai.com/v1/chat/completions",
+                f"{OPENAI_BASE_URL}/chat/completions",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}",
                          "Content-Type": "application/json"},
                 json=payload,
@@ -225,7 +339,7 @@ Untagged lines are ordinary delivery. LOUD/dynamic/fast clusters are where the
 room came alive; that is usually where the clip is. But energy alone is not a
 clip -- a loud line with no substance is still noise.
 
-{intent}{length}Nominate up to {n} ranges. Hunt for ALL of these shapes, not just stories:
+{genre}{intent}{length}Nominate up to {n} ranges. Hunt for ALL of these shapes, not just stories:
 - a complete joke or funny exchange that lands on its punchline
 - a sharp one-liner, roast, or genuine spontaneous reaction
 - advice or an opinion delivered with real conviction
@@ -317,7 +431,10 @@ This is advisory only. A stronger complete moment outside the range still wins.
 
 
 def _collect_candidates(utterances: list, on_progress=None, intent: str = "",
-                        length_guidance: str = "", model: str = None) -> list:
+                        length_guidance: str = "", model: str = None,
+                        genre: str = "") -> list:
+    profile = genre_profile(genre)
+    weights = profile["weights"]
     spans = _windows(len(utterances))
     candidates = []
     intent_block = INTENT_TEMPLATE.format(intent=intent) if intent else ""
@@ -330,6 +447,7 @@ def _collect_candidates(utterances: list, on_progress=None, intent: str = "",
 
         data = _openai_chat(PROMPT.format(
             n=CANDIDATES_PER_WINDOW,
+            genre=profile["brief"],
             intent=intent_block,
             length=length_block,
             transcript=_numbered_slice(utterances, lo, hi),
@@ -348,7 +466,7 @@ def _collect_candidates(utterances: list, on_progress=None, intent: str = "",
 
             scores = c.get("scores") or {}
             total = sum(
-                WEIGHTS[k] * float(scores.get(k, 5) or 5) for k in WEIGHTS
+                weights[k] * float(scores.get(k, 5) or 5) for k in weights
             )
 
             candidates.append({
@@ -460,7 +578,7 @@ Below are candidate moments already shortlisted from a longer video, each with
 its full text. They were scored in isolation, so their numbers are NOT
 comparable -- judge them against each other now, by reading them.
 
-{intent}Pick the {n} strongest as standalone short-form videos. Compare directly: if two
+{genre}{intent}Pick the {n} strongest as standalone short-form videos. Compare directly: if two
 make a similar point, keep only the better-told one. Prefer a moment that earns
 its length over one padded to fill time, and prefer a concrete story or a sharp
 claim over a general observation.
@@ -483,7 +601,7 @@ Return ONLY valid JSON:
       "title": "<punchy title, max 60 chars. WRITE IT IN THE SAME LANGUAGE AND SCRIPT THE SPEAKER USES -- this is burned into the video and becomes the download filename, so it must read like the creator wrote it>",
       "hook": "<one sentence in English: what makes someone stop scrolling>",
       "why_over_others": "<one sentence: why this beat the ones you dropped>",
-      "keywords": ["<2-4 words spoken IN the clip that carry its meaning -- names, numbers, the punchline word. Exact words as spoken, no paraphrasing>"]
+      "keywords": ["<4-8 words or short phrases spoken IN the clip that carry its meaning -- names, places, numbers and stats, the claim's key noun, the punchline word. These are highlighted in the captions, so pick what a viewer skimming with the sound off should catch. Exact words as spoken, no paraphrasing>"]
     }}
   ]
 }}
@@ -540,7 +658,8 @@ def _balance_intent_selection(chosen: list, shortlist: list, n_clips: int,
 
 
 def _final_selection(utterances: list, shortlist: list, n_clips: int,
-                     intent: str = "", model: str = None) -> list:
+                     intent: str = "", model: str = None,
+                     genre: str = "") -> list:
     """Head-to-head comparison of finalists. Falls back to score order."""
     if len(shortlist) <= n_clips:
         return shortlist
@@ -555,7 +674,8 @@ def _final_selection(utterances: list, shortlist: list, n_clips: int,
     try:
         intent_block = SELECT_INTENT_TEMPLATE.format(intent=intent) if intent else ""
         data = _openai_chat(SELECT_PROMPT.format(
-            n=n_clips, intent=intent_block, candidates=blocks), model=model)
+            n=n_clips, genre=genre_profile(genre)["select"],
+            intent=intent_block, candidates=blocks), model=model)
         chosen = []
         for entry in data.get("chosen", []):
             idx = int(entry["id"])
@@ -567,7 +687,7 @@ def _final_selection(utterances: list, shortlist: list, n_clips: int,
                 "title": (entry.get("title") or shortlist[idx]["title"]).strip()[:80],
                 "hook": (entry.get("hook") or shortlist[idx]["hook"]).strip(),
                 "why_over_others": (entry.get("why_over_others") or "").strip(),
-                "keywords": [str(k) for k in (entry.get("keywords") or [])][:4],
+                "keywords": [str(k) for k in (entry.get("keywords") or [])][:8],
             }
             chosen.append(clip)
             if len(chosen) >= n_clips:
@@ -731,10 +851,111 @@ def _refine_boundaries(utterances: list, clips: list, model: str = None) -> list
     return refined
 
 
+_DIVERSITY_STOP = {
+    "the", "a", "an", "and", "or", "but", "to", "of", "in", "on", "for",
+    "is", "are", "was", "were", "be", "been", "it", "this", "that", "you",
+    "i", "we", "they", "he", "she", "me", "my", "your", "our", "their",
+    "so", "if", "as", "at", "by", "with", "from", "not", "no", "do", "does",
+    "did", "have", "has", "had", "will", "would", "can", "could", "just",
+    "like", "about", "what", "when", "how", "why", "there", "here",
+}
+
+
+def _content_tokens(text: str) -> set:
+    return {w.strip(".,!?;:\"'()[]").lower()
+            for w in (text or "").split()
+            if len(w.strip(".,!?;:\"'()[]")) > 2
+            and w.strip(".,!?;:\"'()[]").lower() not in _DIVERSITY_STOP}
+
+
+def _similarity(a: dict, b: dict) -> float:
+    left, right = a.get("_tokens"), b.get("_tokens")
+    if left is None or right is None:
+        return 0.0
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _diversify(utterances, chosen, pool, n_clips):
+    """Swap a redundant or badly clustered pick for a strong alternative.
+
+    Two guards keep this from becoming a quality downgrade: the replacement
+    must be within 1.5 points of the clip it replaces, and it must be clearly
+    less similar to the rest of the set. If neither a redundant pair nor a
+    time-clustered set is found, the editor's choice is returned untouched.
+    """
+    if len(chosen) < 2 or n_clips < 2 or len(pool) <= len(chosen):
+        return chosen
+
+    for clip in chosen + pool:
+        if "_tokens" not in clip:
+            clip["_tokens"] = _content_tokens(_candidate_text(utterances, clip))
+
+    selected = list(chosen)
+
+    def best_replacement(drop, limit):
+        others = [c for c in selected if c is not drop]
+        options = [
+            c for c in pool
+            if c not in selected
+            and not any(_overlaps(c, s) for s in selected)
+            and c["score"] >= drop["score"] - limit
+            and all(_similarity(c, s) < 0.30 for s in others)
+        ]
+        if not options:
+            return None
+        return max(options, key=lambda c: c["score"])
+
+    # 1. Split the most redundant pair, keeping the better-told one.
+    pairs = [(i, j) for i in range(len(selected))
+             for j in range(i + 1, len(selected))]
+    if pairs:
+        i, j = max(pairs, key=lambda ij: _similarity(selected[ij[0]], selected[ij[1]]))
+        if _similarity(selected[i], selected[j]) >= 0.38:
+            drop = min((selected[i], selected[j]), key=lambda c: c["score"])
+            replacement = best_replacement(drop, 1.5)
+            if replacement:
+                print(f"[clipper] diversity: swapped a redundant clip for "
+                      f"'{replacement.get('title', '')[:40]}'")
+                selected[selected.index(drop)] = replacement
+
+    # 2. If every pick is from the opening stretch, offer one strong later one.
+    if len(selected) >= 2 and utterances:
+        total = max(float(u.get("end", 0.0)) for u in utterances) or 1.0
+        starts = [float(c.get("start", 0.0)) for c in selected]
+        if max(starts) < total * 0.55:
+            drop = min(selected, key=lambda c: c["score"])
+            others = [c for c in selected if c is not drop]
+            late = [
+                c for c in pool
+                if c not in selected
+                and not any(_overlaps(c, s) for s in selected)
+                and float(c.get("start", 0.0)) > total * 0.60
+                and c["score"] >= drop["score"] - 1.0
+                and all(_similarity(c, s) < 0.30 for s in others)
+            ]
+            if late:
+                replacement = max(late, key=lambda c: c["score"])
+                print(f"[clipper] diversity: added a later moment "
+                      f"'{replacement.get('title', '')[:40]}'")
+                selected[selected.index(drop)] = replacement
+
+    # Tokens are a scratch detail, not part of the clip contract; leaving them
+    # on the dicts would make the result unserialisable for the job row.
+    for clip in chosen + pool:
+        clip.pop("_tokens", None)
+    return selected
+
+
 def pick_clips(utterances: list, n_clips: int, on_progress=None,
                intent: str = "", length_pref: str = "",
-               model: str = None) -> list:
+               model: str = None, genre: str = "") -> list:
     """Three passes: nominate per window, compare finalists, refine boundaries.
+
+    genre:       key into GENRES ("podcast", "gaming"); empty or unknown runs the
+                 general rubric. Changes what is hunted for and how the six
+                 scores are weighed, never the shape of the selection.
 
     intent:      free-text steer from the user ("when he talks about pricing")
     length_pref: key into LENGTH_PREFS, an advisory bias only -- never a filter,
@@ -742,13 +963,22 @@ def pick_clips(utterances: list, n_clips: int, on_progress=None,
                  user asked for 30-60s.
     """
     intent = intent.strip()
-    candidates = _collect_candidates(
-        utterances,
-        on_progress,
-        intent=intent,
-        length_guidance=LENGTH_PREFS.get(length_pref, ""),
-        model=model,
-    )
+    try:
+        candidates = _collect_candidates(
+            utterances,
+            on_progress,
+            intent=intent,
+            length_guidance=LENGTH_PREFS.get(length_pref, ""),
+            # The window pass is the cost that scales with video length.
+            model=BULK_MODEL,
+            genre=genre,
+        )
+    except RuntimeError as exc:
+        if not LLM_FALLBACK:
+            raise
+        print(f"[clipper] model unavailable ({exc}); falling back to "
+              f"mechanical speech runs for this job")
+        candidates = []
 
     if not candidates:
         # The model found nothing it considered strong. That is a judgement, not
@@ -789,7 +1019,7 @@ def pick_clips(utterances: list, n_clips: int, on_progress=None,
         if on_progress:
             on_progress(-1, len(shortlist))      # signals the comparison stage
         chosen = _final_selection(utterances, shortlist, n_clips, intent=intent,
-                                  model=model)
+                                  model=model, genre=genre)
     else:
         chosen = shortlist[:n_clips]
 
@@ -801,6 +1031,13 @@ def pick_clips(utterances: list, n_clips: int, on_progress=None,
     for c in sorted(chosen, key=lambda c: c["score"], reverse=True):
         if not any(_overlaps(c, picked) for picked in deduped):
             deduped.append(c)
+
+    # The head-to-head pass is asked for a varied set, but a language model
+    # reading short excerpts tends to miss that two winners are the same point
+    # in different words. This deterministic backstop only swaps when a nearly
+    # as strong alternative is clearly less redundant, so it cannot trade a
+    # great clip for a mediocre one just to tick a variety box.
+    deduped = _diversify(utterances, deduped, pool, n_clips)
 
     # Rendering and the dashboard preserve this order, so clip 1 is always the
     # strongest result rather than simply the earliest moment in the source.
@@ -849,18 +1086,24 @@ def _strip_trailing_junk(words: list) -> list:
 
 
 def _trim_weak_opening(words: list, start_time: float) -> float:
-    """Skips a leading filler word so the clip opens on the hook itself."""
+    """Skips leading filler so the clip opens on the hook itself.
+
+    One word was not enough: "yaar, honestly, ye feature..." spent its first
+    1.5 seconds on filler before the claim. Up to two seconds of consecutive
+    discourse markers are cheap to lose; more than that is probably a real
+    sentence and is left alone.
+    """
     if not words:
         return start_time
 
-    for word in words[:3]:
+    for word in words[:5]:
         token = (word.get("punctuated_word") or word.get("word") or "").lower().strip(".,!? ")
         if not token:
             continue
         if token in FILLER_OPENERS:
             continue
-        # First real word -- only trim if it costs less than a second of runway.
-        return word["start"] if word["start"] - start_time < 1.0 else start_time
+        # First real word -- only trim if it costs at most two seconds of runway.
+        return word["start"] if word["start"] - start_time <= 2.0 else start_time
     return start_time
 
 
