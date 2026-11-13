@@ -64,6 +64,9 @@ TITLE_SHARE = 0.075              # title card height, of the frame
 DRIFT = 0.05                     # slow push in/out across a part (5%)
 PUNCH = 0.12                     # punch-in on a part's reaction peak
 PUNCH_RATIO = 2.0                # peak loudness over the part's mean that earns one
+JUMP = 0.12                      # held punch-in between sentence breaks
+JUMP_MIN_GAP = 5.0               # at most one framing change per this many seconds
+JUMP_MAX_GAP = 9.0               # a talking shot never holds one framing longer
 SECTION_SECONDS = 3.0            # how long a moment's lower-third title stays
 SNAP_GAP = 0.25                  # a pause this long is a safe place to cut
 TAIL_PAD = 0.12
@@ -255,6 +258,32 @@ def _cut_points(words: list, duration: float, length: float) -> list:
             points.append(float(word["start"]))
     latest = max(0.0, duration - length * 0.75)
     return sorted({round(p, 3) for p in points if 0.0 <= p <= latest}) or [0.0]
+
+
+def jump_beats(words: list, duration: float) -> list:
+    """(start, end) spans to hold a tighter framing, cut on sentence breaks.
+
+    Jump cuts in and out every 5-9 s are what keeps a long talking shot
+    watchable: the eye gets a new picture without anything flashy. Spans
+    alternate wide / tight, so every other sentence-ish chunk is punched in.
+    """
+    points = [p for p in _cut_points(words, duration, 0.0) if 0.0 < p < duration - 1.5]
+    cuts, last = [], 0.0
+    for p in points:
+        if p - last >= JUMP_MIN_GAP:
+            cuts.append(p)
+            last = p
+    # Fill silences / missing words so no framing holds past JUMP_MAX_GAP.
+    filled, last = [], 0.0
+    for p in cuts + [duration]:
+        while p - last > JUMP_MAX_GAP + 2.0 and last + JUMP_MAX_GAP < duration - 1.5:
+            last += JUMP_MAX_GAP
+            filled.append(round(last, 3))
+        if p < duration:
+            filled.append(p)
+            last = p
+    edges = [0.0] + filled + [duration]
+    return [(edges[i], edges[i + 1]) for i in range(1, len(edges) - 1, 2)]
 
 
 def teaser_window(words: list, duration: float, energy: list = None,
@@ -520,6 +549,8 @@ def _motion(seg: dict, width: int, height: int) -> str:
         return ""
     d = max(seg["duration"], 0.1)
     z = (f"1+{DRIFT}*t/{d:.3f}" if direction > 0 else f"1+{DRIFT}*(1-t/{d:.3f})")
+    for a, b in seg.get("jumps") or ():
+        z += f"+{JUMP}*between(t,{a:.3f},{b:.3f})"
     if seg.get("punch") is not None:
         z += f"+{PUNCH}*exp(-pow((t-{seg['punch']:.2f})/0.3,2))"
     return (f"scale=w='2*trunc(iw*({z})/2)':h='2*trunc(ih*({z})/2)':eval=frame,"
@@ -675,6 +706,8 @@ def build(job_dir: str, segments: list, width: int, height: int,
     # a clear reaction peak (a loud spike well above the part's own level).
     for i, part in enumerate(parts):
         part["motion"] = 1 if i % 2 == 0 else -1
+        if not part.get("pip"):        # a watch-along keeps its cam steady
+            part["jumps"] = jump_beats(part.get("words") or [], part["duration"])
         energy = content.audio_energy(part["path"])
         if energy and part["duration"] > 6:
             peak = max(range(len(energy)), key=energy.__getitem__)
