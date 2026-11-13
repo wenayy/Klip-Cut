@@ -2,6 +2,15 @@
 
 AI-powered platform that turns long-form videos into short, viral-ready clips with burned-in captions, titles, and customizable layouts.
 
+<p align="center">
+  <a href="docs/media/klipcut-promo.mp4"><img src="docs/media/klipcut-promo.gif" alt="KlipCut: a long video goes in, the AI picks the moments, frames the speaker, captions it, and short clips come out" width="820"></a>
+</p>
+
+**Two things it makes from one long video:**
+
+- **Short clips** — vertical, captioned, framed on whoever is speaking, ready for TikTok, Reels and Shorts.
+- **A highlight video** — one 8–15 minute cut of the best parts of a 1–3 hour stream or podcast, in story order, ready for YouTube (with chapters).
+
 ## How It Works
 
 1. **Paste a URL or upload a video** — supports YouTube, TikTok, Twitter, and direct uploads
@@ -9,6 +18,7 @@ AI-powered platform that turns long-form videos into short, viral-ready clips wi
 3. **Frames each clip for what it actually is** — the **Auto** template inspects the footage and picks a treatment per clip: podcast / talking head (face-tracked, speaker-aware), gameplay with a webcam, gameplay with no facecam (action-tracked), or screencast. The manual templates remain as overrides.
 4. **Edit in the browser** — trim, restyle captions, change layouts, add overlays, adjust pacing — all with a live preview that matches the final export
 5. **Export** — renders polished vertical clips ready for social media
+6. **Or make a highlight video** — instead of clips, pick *Highlight video*: the best moments from across the whole source fill a time budget, then play in the order they happened, opened by a cold-open teaser, joined with quick transitions, optional meme beats and "25 MIN LATER" tags. Copy-ready YouTube chapters come with it.
 
 ### Podcasts
 
@@ -35,7 +45,7 @@ VOD still produces clips.
 
 ### Captions
 
-50+ presets grouped by cadence (karaoke, Hormozi, hype, podcast, social,
+60+ presets grouped by cadence (karaoke, Hormozi, hype, podcast, social,
 cinematic, neon, story, vibrant, clean) plus five house looks — **Pro Caps**
 (uppercase white, black edge, light-blue spoken word — the reference style),
 **Pro Glow**, **Pro Pop**, **Pro Chip**, **Pro Soft**. Word-level karaoke,
@@ -109,24 +119,16 @@ so a batch does not jump in volume from clip to clip.
 
 ## Sample output
 
-| Podcast — Auto (reaction + active speaker) | Gaming — Auto (gameplay + facecam) |
-|---|---|
-| ![Podcast clip](docs/verification/podcast-auto.jpg) | ![Gaming clip](docs/verification/gaming-facecam.jpg) |
-
-| Caption looks: Pro Caps (default), Pro Glow, Pro Pop, Pro Chip / Pro Soft |
+| Caption looks, rendered by the pipeline — keyword colours rotate per idea |
 |---|
-| ![Caption presets](docs/verification/caption-presets.jpg) |
+| ![Caption looks: Headline, Backdrop, Bounce, Beast, Arcade, Deep Dive](docs/media/caption-looks.png) |
 
-| Color emoji, composited by the renderer | The reference this matches |
+| Clips or a highlight video, chosen first | 60+ caption styles, previewed live |
 |---|---|
-| ![Pro Caps with color emoji](docs/verification/pro-caps-emoji.jpg) | ![Reference emoji style](docs/verification/reference-emoji.jpg) |
+| ![The studio: what do you want to make?](docs/media/app-make.jpg) | ![Caption style picker](docs/media/app-caption-styles.jpg) |
 
-| Two-word Pro Caps, Auto Zoom | Hi-res color emoji with shadow |
-|---|---|
-| ![Two-word captions](docs/verification/pro-caps-v2.jpg) | ![Hi-res emoji](docs/verification/emoji-hires.jpg) |
-
-Rendered by the pipeline during verification against public Pexels / repo gameplay
-footage; frames are unretouched exports.
+The promo above is pure motion graphics made in code (no third-party footage); the caption
+sheet is unretouched output of `pipeline/subtitles.py` on plain backgrounds.
 
 ## Architecture
 
