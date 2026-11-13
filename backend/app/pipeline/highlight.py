@@ -180,6 +180,7 @@ def timeline(parts: list, genre: str = "general", memes: bool = True) -> list:
     """
     reactions = REACTIONS.get(genre) or REACTIONS["general"]
     segments = [p for p in parts if p["kind"] == "segment"]
+    memes = memes and (genre or "").lower() not in NO_MEME_GENRES
     slots = meme_slots([s.get("score", 0) for s in segments]) if memes else set()
     choices = GAMING_TRANSITIONS if (genre or "").lower() == "gaming" else TRANSITIONS
     out, seen, used = [], -1, 0
@@ -265,7 +266,7 @@ def _cut_points(words: list, duration: float, length: float) -> list:
     return sorted({round(p, 3) for p in points if 0.0 <= p <= latest}) or [0.0]
 
 
-def jump_beats(words: list, duration: float) -> list:
+def jump_beats(words: list, duration: float, min_gap: float = JUMP_MIN_GAP) -> list:
     """(start, end) spans to hold a tighter framing, cut on sentence breaks.
 
     Jump cuts in and out every 5-9 s are what keeps a long talking shot
@@ -275,7 +276,7 @@ def jump_beats(words: list, duration: float) -> list:
     points = [p for p in _cut_points(words, duration, 0.0) if 0.0 < p < duration - 1.5]
     cuts, last = [], 0.0
     for p in points:
-        if p - last >= JUMP_MIN_GAP:
+        if p - last >= min_gap:
             cuts.append(p)
             last = p
     # Fill silences / missing words so no framing holds past JUMP_MAX_GAP.
@@ -683,6 +684,86 @@ def _meme(source: str, out: str, width: int, height: int, text: str,
         pass
 
 
+MONTAGE_BEATS = 4                # moments in the cold open
+MONTAGE_BEAT_SECONDS = 1.8
+MONTAGE_TAG = "HIGHLIGHTS"
+NO_MEME_GENRES = ("podcast", "talking_head")   # a joke card over a serious talk reads wrong
+
+
+def plan_edit(parts: list, genre: str = "general") -> list:
+    """Decide, per part, how it is edited -- from what the part actually is.
+
+    * a part with a facecam inset (watch-along) keeps a steady frame;
+    * speech-heavy parts get held punch-ins on sentence breaks, cut faster when
+      the speaker talks fast and slower when the pace is easy;
+    * parts with little speech (gameplay, b-roll) get only the slow drift;
+    * a loud, clear reaction peak earns one punch-in on top.
+    """
+    for i, part in enumerate(parts):
+        part["motion"] = 1 if i % 2 == 0 else -1
+        words = part.get("words") or []
+        rate = len(words) / max(part["duration"], 1.0)
+        if not part.get("pip") and rate >= 1.0:
+            part["jumps"] = jump_beats(words, part["duration"],
+                                       min_gap=3.0 if rate >= 2.8 else JUMP_MIN_GAP)
+        energy = content.audio_energy(part["path"])
+        if energy and part["duration"] > 6:
+            peak = max(range(len(energy)), key=energy.__getitem__)
+            at = peak * content.HIGHLIGHT_HOP
+            mean = sum(energy) / len(energy)
+            if mean > 0 and energy[peak] >= PUNCH_RATIO * mean and 1.0 < at < part["duration"] - 1.0:
+                part["punch"] = at
+    return parts
+
+
+def montage_beats(parts: list, n: int = MONTAGE_BEATS) -> list:
+    """[(part, start, end)] -- the peak of the n best-scoring parts, best last.
+
+    Ending on the strongest beat leaves the viewer on the hook; the picks are
+    spread over different parts so no moment is shown twice.
+    """
+    segments = [p for p in parts if p.get("kind") == "segment"]
+    # A facecam inset is laid over each part later; a montage cut from several
+    # parts could not carry them, so those parts sit the cold open out.
+    segments = [p for p in segments if not p.get("pip")] or segments
+    ranked = sorted(segments, key=lambda p: p.get("score") or 0, reverse=True)[:n]
+    beats = []
+    for part in ranked:
+        s, e = teaser_window(part.get("words") or [], part["duration"],
+                             content.audio_energy(part["path"]),
+                             length=MONTAGE_BEAT_SECONDS)
+        beats.append((part, s, e))
+    return beats[::-1]
+
+
+def _montage(job_dir: str, beats: list, out: str, width: int, height: int,
+             font: str) -> None:
+    """Hard-cut the beats together and burn the tag over all of them."""
+    cuts = []
+    for k, (part, s, e) in enumerate(beats):
+        path = os.path.join(job_dir, f"{WORK_PREFIX}beat_{k}.mp4")
+        _cut(part["path"], s, e, path)
+        cuts.append(path)
+    inputs, chain = [], []
+    for k, path in enumerate(cuts):
+        inputs += ["-i", path]
+        chain.append(f"[{k}:v]fps={FPS},scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                     f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v{k}];"
+                     f"[{k}:a]aresample=48000,aformat=channel_layouts=stereo[a{k}]")
+    tag = os.path.join(job_dir, f"{WORK_PREFIX}montage_tag.txt")
+    with open(tag, "w", encoding="utf-8") as handle:
+        handle.write(MONTAGE_TAG)
+    size = max(24, int(height * 0.04))
+    joined = "".join(f"[v{k}][a{k}]" for k in range(len(cuts)))
+    graph = (";".join(chain) + f";{joined}concat=n={len(cuts)}:v=1:a=1[cv][ca];"
+             f"[cv]drawtext=fontfile='{render._ff_escape(font)}':textfile='{render._ff_escape(tag)}'"
+             f":fontsize={size}:fontcolor=0xFFE23B:borderw={max(3, size // 8)}:bordercolor=black"
+             f":x={int(width * 0.04)}:y={int(height * 0.05)}[vout]")
+    _run("highlight montage", ["ffmpeg", "-y", *inputs, "-filter_complex", graph,
+                               "-map", "[vout]", "-map", "[ca]",
+                               "-threads", str(render.FFMPEG_THREADS), *_INTERMEDIATE, out])
+
+
 def _sfx(name: str):
     path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..",
                                         "assets", "sfx", name))
@@ -707,29 +788,15 @@ def build(job_dir: str, segments: list, width: int, height: int,
     parts = [p for p in parts if p["duration"] > 0.5]
     if not parts:
         raise RuntimeError("No highlight segments rendered.")
-    # Camera work per part: alternate push in / push out, and a punch-in on
-    # a clear reaction peak (a loud spike well above the part's own level).
-    for i, part in enumerate(parts):
-        part["motion"] = 1 if i % 2 == 0 else -1
-        if not part.get("pip"):        # a watch-along keeps its cam steady
-            part["jumps"] = jump_beats(part.get("words") or [], part["duration"])
-        energy = content.audio_energy(part["path"])
-        if energy and part["duration"] > 6:
-            peak = max(range(len(energy)), key=energy.__getitem__)
-            at = peak * content.HIGHLIGHT_HOP
-            mean = sum(energy) / len(energy)
-            if mean > 0 and energy[peak] >= PUNCH_RATIO * mean and 1.0 < at < part["duration"] - 1.0:
-                part["punch"] = at
+    plan_edit(parts, genre)
 
-    # Cold open: the peak of the strongest moment, before the story starts.
+    # Cold open: a quick montage of the best beats, tagged, before the story.
     if len(parts) >= 3:
-        best = max(parts, key=lambda p: p.get("score") or 0)
-        s, e = teaser_window(best.get("words") or [], best["duration"],
-                             content.audio_energy(best["path"]))
         teaser = os.path.join(job_dir, f"{WORK_PREFIX}teaser.mp4")
-        _cut(best["path"], s, e, teaser)
-        parts.insert(0, {"kind": "teaser", "path": teaser, "pip": best.get("pip"),
-                         "duration": content.probe_duration(teaser)})
+        beats = montage_beats(parts)
+        _montage(job_dir, beats, teaser, width, height, render._watermark_font())
+        parts.insert(0, {"kind": "teaser", "path": teaser,
+                         "pip": None, "duration": content.probe_duration(teaser)})
 
     plan = timeline(parts, genre, memes=memes)
     font = render._watermark_font()
