@@ -54,3 +54,6 @@ testdata/
 
 # local render screenshots (contain third-party footage; never commit)
 docs/verification/
+
+# experimental second frontend; kept locally, not part of the app
+frontend-premium/
