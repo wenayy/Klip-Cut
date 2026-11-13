@@ -64,6 +64,11 @@ TITLE_SHARE = 0.075              # title card height, of the frame
 DRIFT = 0.05                     # slow push in/out across a part (5%)
 PUNCH = 0.12                     # punch-in on a part's reaction peak
 PUNCH_RATIO = 2.0                # peak loudness over the part's mean that earns one
+# Warm, a touch punchier than the source, with a faint grain that keeps flat
+# phone/webcam footage from looking sterile (the food-vlog look).
+GRADE = ("eq=contrast=1.08:saturation=1.14:gamma=0.98,"
+         "colorbalance=rs=0.03:bs=-0.03:rh=0.02:bh=-0.02,"
+         "noise=alls=5:allf=t")
 JUMP = 0.12                      # held punch-in between sentence breaks
 JUMP_MIN_GAP = 5.0               # at most one framing change per this many seconds
 JUMP_MAX_GAP = 9.0               # a talking shot never holds one framing longer
@@ -445,7 +450,7 @@ def join_graph(segments: list, audio_inputs: dict, width: int, height: int,
 
     # A light grade across the whole reel. It is not a LUT; it makes the
     # segments, which come from different renders, sit closer together.
-    parts.append(f"{v}eq=contrast=1.04:saturation=1.06[vgrade]")
+    parts.append(f"{v}{GRADE}[vgrade]")
     v = "[vgrade]"
 
     draws = []

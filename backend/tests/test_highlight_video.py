@@ -155,7 +155,7 @@ def test_highlight_uses_impact_riser_pop_and_a_light_grade():
     assert "asplit=2[imps0][imps1]" in graph
     assert "volume=0.50" in graph and "volume=0.38" in graph and "volume=0.22" in graph
     assert "[impmix]" in graph and "[rismix]" in graph and "[popmix]" in graph
-    assert "eq=contrast=1.04:saturation=1.06" in graph
+    assert highlight.GRADE in graph
 
 
 def test_long_skip_gets_a_full_frame_context_card():
