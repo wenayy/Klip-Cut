@@ -564,6 +564,8 @@ export default function App() {
   const [uploadDuration, setUploadDuration] = useState(null);
   const [nClips, setNClips] = useState(3);
   const [burnSubtitles, setBurnSubtitles] = useState(true);
+  // With captions off, keyword phrases + emoji still pop up unless this is off.
+  const [keywordCaptions, setKeywordCaptions] = useState(true);
   const [burnTitle, setBurnTitle] = useState(true);
   const [autoCensor, setAutoCensor] = useState(true);
   const [multilingual, setMultilingual] = useState(false);
@@ -587,6 +589,7 @@ export default function App() {
   const [highlightMinutes, setHighlightMinutes] = useState(null);   // null = auto
   const [highlightMemes, setHighlightMemes] = useState(true);
   const [highlightTags, setHighlightTags] = useState(true);
+  const [highlightMusic, setHighlightMusic] = useState(true);
   // The studio is a 3-step wizard now: 1 source, 2 preferences, 3 review.
   const [step, setStep] = useState(1);
   // The feature someone just reached for, so the upgrade dialog can name it.
@@ -987,6 +990,7 @@ export default function App() {
         nClips,
         mode: "original",
         burnSubtitles,
+        keywordCaptions,
         burnTitle,
         autoCensor,
         // Never send a gated flag on a plan that does not include it: the server
@@ -1007,6 +1011,7 @@ export default function App() {
         highlightMinutes: output === "highlight" ? highlightMinutes : null,
         highlightMemes,
         highlightTags,
+        highlightMusic,
       };
       const result = sourceMode === "upload"
         ? await uploadJob(uploadFile, {
@@ -1014,6 +1019,7 @@ export default function App() {
             n_clips: options.nClips,
             mode: options.mode,
             burn_subtitles: options.burnSubtitles,
+            keyword_captions: options.keywordCaptions,
             burn_title: options.burnTitle,
             auto_censor: options.autoCensor,
             multilingual: options.multilingual,
@@ -1032,6 +1038,7 @@ export default function App() {
             highlight_minutes: options.highlightMinutes,
             highlight_memes: options.highlightMemes,
             highlight_tags: options.highlightTags,
+            highlight_music: options.highlightMusic,
           }, setUploadPct, turnstileToken)
         : await submitJob({ url: url.trim(), ...options, turnstileToken });
       const { job_id } = result;
@@ -1659,7 +1666,8 @@ export default function App() {
                 prefs={{
                   nClips, setNClips, ratio, setRatio, lengthPref, setLengthPref,
                   genre, setGenre,
-                  burnSubtitles, setBurnSubtitles, burnTitle, setBurnTitle,
+                  burnSubtitles, setBurnSubtitles, keywordCaptions, setKeywordCaptions,
+                  burnTitle, setBurnTitle,
                   autoCensor, setAutoCensor,
                   multilingual, setMultilingual, tightenPauses, setTightenPauses,
                   template, setTemplate, intent, setIntent,
@@ -1668,6 +1676,7 @@ export default function App() {
                   advancedModel, setAdvancedModel,
                   output, setOutput, highlightMinutes, setHighlightMinutes,
                   highlightMemes, setHighlightMemes, highlightTags, setHighlightTags,
+                  highlightMusic, setHighlightMusic,
                   sourceSeconds: sourceMode === "link" ? linkPreview?.duration : uploadDuration,
                 }}
                 plan={plan}

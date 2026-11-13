@@ -637,7 +637,8 @@ def group_words(words: list, max_words: int = None) -> list:
         span = current[-1]["end"] - current[0]["start"]
 
         ends_sentence = text.endswith((".", "!", "?"))
-        if len(current) >= limit or span >= MAX_CUE_SECONDS or ends_sentence:
+        if (len(current) >= limit or span >= MAX_CUE_SECONDS or ends_sentence
+                or word.get("cue_break")):
             cues.append(current)
             current = []
 
@@ -938,14 +939,26 @@ def keyword_hits(words: list, keywords: list = None) -> set:
     plural and possessive forms count ("women's" for "women"), and numbers --
     the stats a clip usually turns on -- are always emphasised, at no cost.
     """
-    tokens = [_key_token(_word_text(w)) for w in words]
     hits = set()
+    for a, b in keyword_spans(words, keywords):
+        hits.update(range(a, b))
+    return hits
+
+
+def keyword_spans(words: list, keywords: list = None) -> list:
+    """[(first, end)) word-index spans, one per keyword said, in order.
+
+    A span is one whole phrase, so two keywords said back to back stay two
+    spans -- the captions-off pop-ups show them as two moments, not one run.
+    """
+    tokens = [_key_token(_word_text(w)) for w in words]
     phrases = []
     for keyword in keywords or []:
         parts = [_key_token(p) for p in str(keyword).split()]
         parts = [p for p in parts if p]
         if parts:
             phrases.append(parts)
+    spans = []
     for i in range(len(tokens)):
         for phrase in phrases:
             n = len(phrase)
@@ -953,10 +966,56 @@ def keyword_hits(words: list, keywords: list = None) -> set:
             if len(window) == n and all(
                     a == b or (len(b) > 3 and a.rstrip("s") == b.rstrip("s"))
                     for a, b in zip(window, phrase)):
-                hits.update(range(i, i + n))
+                spans.append((i, i + n))
         if _NUMBER.match(tokens[i]) or tokens[i] in NUMBER_WORDS:
-            hits.add(i)
-    return hits
+            spans.append((i, i + 1))
+    spans.sort()
+    merged = []
+    for a, b in spans:                       # a number inside a phrase, say
+        if merged and a < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+# Captions off still shows what the clip is about: its keyword phrases pop up
+# on their own (with emoji), the way editors put up a key word over a talking
+# head rather than subtitling every sentence.
+POPUP_HOLD = 1.2          # s a pop-up stays up, so a fast phrase is still read
+POPUP_REPEAT_GAP = 10.0   # the same phrase again this soon is not shown again
+POPUP_MAX_WORDS = 3       # longer phrases are shown in even chunks
+
+
+def keyword_popups(words: list, keywords: list = None) -> list:
+    """The words to caption when captions are off: keyword phrases only.
+
+    Returns copies of the chosen words; each pop-up's last word carries
+    `cue_break` (so every grouping of cues -- captions, emoji, overlays -- ends
+    the cue there) and an `end` held for POPUP_HOLD, never into the next one.
+    """
+    chunks, last_seen = [], {}
+    for a, b in keyword_spans(words, keywords):
+        key = " ".join(_key_token(_word_text(w)) for w in words[a:b])
+        start = words[a]["start"]
+        if start - last_seen.get(key, -1e9) < POPUP_REPEAT_GAP:
+            continue
+        last_seen[key] = start
+        n = b - a
+        parts = -(-n // POPUP_MAX_WORDS)
+        bounds = [a + round(k * n / parts) for k in range(parts + 1)]
+        chunks.extend(words[x:y] for x, y in zip(bounds, bounds[1:]))
+    out = []
+    for k, chunk in enumerate(chunks):
+        copies = [dict(w) for w in chunk]
+        last = copies[-1]
+        end = max(last["end"], copies[0]["start"] + POPUP_HOLD)
+        if k + 1 < len(chunks):
+            end = min(end, chunks[k + 1][0]["start"] - 0.05)
+        last["end"] = max(last["end"], end)
+        last["cue_break"] = True
+        out.extend(copies)
+    return out
 
 
 def keyword_slots(words: list, hits: set) -> dict:
@@ -1148,7 +1207,7 @@ def _fit_canvas(st: dict, play_res: tuple) -> dict:
     res_x, res_y = play_res
     if res_x <= res_y * 0.7:                      # portrait: as designed
         return st
-    k = min(1.0, (res_y / PLAY_RES_Y) ** 0.6)
+    k = min(1.0, (res_y / PLAY_RES_Y) ** 0.45)
     out = dict(st)
     for key in ("size", "outline", "shadow", "text_outline", "pad_x"):
         if out.get(key):

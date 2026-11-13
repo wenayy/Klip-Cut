@@ -598,48 +598,56 @@ def _video_format(max_height: int = 1080) -> str:
     )
 
 
+# Clients tried in order when the default set fails. android_vr and tv_simply
+# serve HD without a PO token; android is the last resort because it only
+# serves format 18 (360p combined) -- a working clip beats a failed job, but a
+# 360p source upscaled ~3x into a split-screen tile is what made clips soft, so
+# it must never be the first fallback.
+VIDEO_FALLBACK_CLIENTS = ("android_vr,tv_simply", "android")
+
+
+def _source_height(path: str) -> int:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=height", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        return int(out.splitlines()[0])
+    except (subprocess.SubprocessError, OSError, ValueError, IndexError):
+        return 0
+
+
 def download_video(url: str, out_path: str, on_progress=None,
                    max_height: int = 1080) -> str:
-    # Try the default client first — it gets the best quality and works when
-    # the IP is not flagged by YouTube.
-    try:
-        _run_with_progress(
-            [
-                "yt-dlp",
-                "--merge-output-format", "mp4",
-                "--newline",
-                "--no-playlist",
-                "--force-overwrites",
-                *_cookie_args(),
-                *_download_args(),
-                "-o", out_path,
-                url,
-            ],
-            on_progress,
-        )
-        return out_path
-    except RuntimeError:
-        pass
-
-    # Default failed (usually HTTP 403 from a flagged IP). The android client
-    # still serves format 18 (360p combined) without needing a PO token or
-    # cookies. Lower quality, but a working clip beats a failed job.
-    print("[clipper] video download failed, retrying with android client")
-    _run_with_progress(
-        [
-            "yt-dlp",
-            "--extractor-args", "youtube:player_client=android",
-            "--merge-output-format", "mp4",
-            "--newline",
-            "--no-playlist",
-            "--force-overwrites",
-            *_cookie_args(),
-            *_download_args(),
-            "-o", out_path,
-            url,
-        ],
-        on_progress,
-    )
+    # The plan's height cap was computed but never passed, so yt-dlp chose
+    # freely; every attempt now asks for the best stream up to the cap.
+    base = [
+        "yt-dlp",
+        "-f", _video_format(max_height),
+        "--merge-output-format", "mp4",
+        "--newline",
+        "--no-playlist",
+        "--force-overwrites",
+        *_cookie_args(),
+        *_download_args(),
+        "-o", out_path,
+    ]
+    attempts = [[]] + [["--extractor-args", f"youtube:player_client={c}"]
+                       for c in VIDEO_FALLBACK_CLIENTS]
+    for i, extra in enumerate(attempts):
+        try:
+            _run_with_progress([*base, *extra, url], on_progress)
+            break
+        except RuntimeError:
+            # Usually HTTP 403 from a flagged IP on the default clients.
+            if i == len(attempts) - 1:
+                raise
+            print(f"[clipper] video download failed, retrying with "
+                  f"{VIDEO_FALLBACK_CLIENTS[i]} client")
+    height = _source_height(out_path)
+    if height and height < min(720, max_height):
+        print(f"[clipper] WARNING source downloaded at {height}p (cap "
+              f"{max_height}p); clips will be soft -- upload the file instead")
     return out_path
 
 

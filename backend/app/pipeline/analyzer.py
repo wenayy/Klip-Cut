@@ -412,7 +412,11 @@ Transcript:
 # Advisory only -- phrased as a preference, never a hard filter, so a great
 # moment outside the requested band still wins over a padded one inside it.
 LENGTH_PREFS = {
-    "any": "",
+    # These are vertical shorts. Two-minute picks were long enough that people
+    # trimmed them by hand; the genre brief still sets the normal range.
+    "any": ("These become vertical shorts: keep each as tight as the complete "
+            "moment allows, and go past 90 seconds only when the payoff truly "
+            "needs it."),
     "short": "Prefer moments that are complete in under 30 seconds.",
     "medium": "Prefer moments that run roughly 30-60 seconds.",
     "long": "Prefer longer moments, roughly 60-90 seconds, with room to develop.",

@@ -36,7 +36,7 @@ function authHeaders() {
 }
 
 
-export async function submitJob({ url, nClips, mode, burnSubtitles, burnTitle, autoCensor, multilingual, tightenPauses, voice, language, template, captionStyle, ratio, lengthPref, genre, intent, highQuality, advancedModel, output, highlightMinutes, highlightMemes, highlightTags, turnstileToken }) {
+export async function submitJob({ url, nClips, mode, burnSubtitles, keywordCaptions, burnTitle, autoCensor, multilingual, tightenPauses, voice, language, template, captionStyle, ratio, lengthPref, genre, intent, highQuality, advancedModel, output, highlightMinutes, highlightMemes, highlightTags, highlightMusic, turnstileToken }) {
   const resp = await fetch(`${API_BASE}/jobs`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -45,6 +45,7 @@ export async function submitJob({ url, nClips, mode, burnSubtitles, burnTitle, a
       n_clips: nClips,
       mode,
       burn_subtitles: burnSubtitles,
+      keyword_captions: keywordCaptions !== false,
       burn_title: burnTitle !== false,
       auto_censor: autoCensor !== false,
       multilingual: multilingual === true,
@@ -63,6 +64,7 @@ export async function submitJob({ url, nClips, mode, burnSubtitles, burnTitle, a
       highlight_minutes: highlightMinutes || null,
       highlight_memes: highlightMemes !== false,
       highlight_tags: highlightTags !== false,
+      highlight_music: highlightMusic !== false,
       turnstile_token: turnstileToken || "",
     }),
   });

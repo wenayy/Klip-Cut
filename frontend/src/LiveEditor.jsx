@@ -21,7 +21,7 @@ import posthog, { isPostHogConfigured } from "./posthog";
    lands -- never a second source of truth. */
 const FALLBACK_STYLE = {
   color: "#fff", active: "#d8f24e", px: 76, box: "none", outline: 5,
-  caps: false, effect: "color", mode: "karaoke", maxWords: 4, position: "bottom",
+  caps: false, effect: "color", mode: "karaoke", maxWords: 2, position: "bottom",
 };
 
 /* Caption and title sizes are absolute px on the OUTPUT canvas, whose width
@@ -560,6 +560,9 @@ export default function LiveEditor({
        are posted with the platform's own captions or none at all, and until now
        the only way to get one was to re-run the whole job. */
     capOn: initial.captions_on ?? (job.options?.burn_subtitles !== false),
+    /* With captions off, the clip's keyword phrases still pop up with emoji
+       unless this is off too -- then the export is a clean picture. */
+    kwOn: initial.keyword_captions ?? (job.options?.keyword_captions !== false),
     /* Emoji is its own switch because "the captions are right but the emoji is
        not my channel" is a real, common edit. It is remembered per clip, so a
        re-export keeps the choice instead of silently reintroducing them. */
@@ -583,7 +586,7 @@ export default function LiveEditor({
   const doc = history.state;
   const {
     start, end, ratio, template, capStyle, capFont, capSize, capPos, capAnim,
-    capWords, capColor, capActive, capOn, autoEmoji, autoZoom, autoTransitions,
+    capWords, capColor, capActive, capOn, kwOn, autoEmoji, autoZoom, autoTransitions,
     autoSfx, musicBed, autoBroll,
     translateTo, title, titleStyle, titleFont, titleSize, speed, speedPitched, tightenPauses,
     background, gameplayFile,
@@ -634,6 +637,7 @@ export default function LiveEditor({
   const setCapColor = (v) => history.apply({ capColor: v }, { discrete: true });
   const setCapActive = (v) => history.apply({ capActive: v }, { discrete: true });
   const setCapOn = (v) => history.apply({ capOn: v }, { discrete: true });
+  const setKwOn = (v) => history.apply({ kwOn: v }, { discrete: true });
   const setAutoEmoji = (v) => history.apply({ autoEmoji: v }, { discrete: true });
   const setTranslateTo = (v) => history.apply({ translateTo: v }, { discrete: true });
   const setTitle = (v) => history.apply({ title: v });
@@ -770,7 +774,7 @@ export default function LiveEditor({
     : ratio === "16:9" ? [1920, 1080] : [1080, 1920];
   /* Mirrors subtitles._fit_canvas: presets are designed on the 1080x1920
      canvas, so a square or landscape frame scales caption sizes down. */
-  const canvasScale = outW > outH * 0.7 ? Math.min(1, Math.pow(outH / 1920, 0.6)) : 1;
+  const canvasScale = outW > outH * 0.7 ? Math.min(1, Math.pow(outH / 1920, 0.45)) : 1;
   /* `fit` takes the same zoom as `blur` now -- the two differ in what fills the
      leftover height (flat colour vs a blurred copy), not in how big the picture
      is. It used to be the letterboxed height with no zoom at all. */
@@ -1006,6 +1010,7 @@ export default function LiveEditor({
         caption_color: capColor,
         caption_active_color: capActive,
         captions_on: capOn,
+        keyword_captions: kwOn,
         auto_emoji: autoEmoji,
         words_per_cue: capWords,
         auto_zoom: autoZoom,
@@ -1298,6 +1303,7 @@ export default function LiveEditor({
         caption_color: capColor,
         caption_active_color: capActive,
         captions_on: capOn,
+        keyword_captions: kwOn,
         auto_emoji: autoEmoji,
         words_per_cue: capWords,
         auto_zoom: autoZoom,
@@ -1961,7 +1967,9 @@ export default function LiveEditor({
                 <strong>Burn captions in</strong>
                 <span>{capOn
                   ? "Word-timed captions are rendered into the file."
-                  : "This clip exports clean — no captions in the video."}</span>
+                  : kwOn
+                    ? "No full captions — only the key phrases pop up, with emoji."
+                    : "This clip exports clean — no captions in the video."}</span>
               </span>
               <button
                 className="switch"
@@ -1987,7 +1995,7 @@ export default function LiveEditor({
             <span className="ctl-label">Words</span>
             <div className="segmented words-seg" role="group" aria-label="Words per cue">
               {[1, 2, 3].map((n) => {
-                const current = capWords || st.maxWords || 3;
+                const current = capWords || st.maxWords || 2;
                 return (
                   <button key={n} type="button"
                           className={`seg ${current === n ? "on" : ""}`}
@@ -2035,10 +2043,47 @@ export default function LiveEditor({
         )}
 
         {section === "captions" && canEditCaptions && !capOn && (
-          <p className="captions-off-note">
-            Caption styling is hidden while captions are off. The transcript
-            above still drives the cut, so trims stay word-accurate.
-          </p>
+        <div className="live-controls">
+          <div className="ctl ctl-block">
+            <div className="cap-onoff">
+              <span className="cap-onoff-copy">
+                <strong>Keyword pop-ups</strong>
+                <span>{kwOn
+                  ? "The clip's key phrases pop up in this style. They show in the export."
+                  : "Off — nothing is written over the video."}</span>
+              </span>
+              <button
+                className="switch"
+                role="switch"
+                aria-checked={kwOn}
+                aria-label="Pop up keyword phrases and emoji"
+                data-testid="keyword-captions-toggle"
+                onClick={() => setKwOn(!kwOn)}
+              />
+            </div>
+          </div>
+          {kwOn && (
+          <>
+          <div className="ctl ctl-block">
+            <span className="ctl-label">Pop-up style</span>
+            <CaptionPresetPicker value={capStyle} onChange={setCapStyle}
+                                 data={presetData} />
+          </div>
+          <div className="ctl">
+            <span className="ctl-label">Emoji</span>
+            <button
+              type="button"
+              className={`chip-btn ${autoEmoji ? "on" : ""}`}
+              onClick={() => setAutoEmoji(!autoEmoji)}
+              title={autoEmoji
+                ? "An emoji on most pop-ups. Click for none."
+                : "No emoji in the export. Click to allow them again."}
+              data-testid="emoji-toggle-popups"
+            >{autoEmoji ? "On" : "Off"}</button>
+          </div>
+          </>
+          )}
+        </div>
         )}
 
         {/* The title is its own design decision, not a second caption -- a

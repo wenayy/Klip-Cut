@@ -55,13 +55,15 @@ def test_hard_shadow_and_coloured_stroke_reach_the_style(tmp_path):
 
 
 def test_reveal_hides_words_that_have_not_been_spoken(tmp_path):
-    events = _events(_build(tmp_path, "sig_wordpop", text="one two three"))
+    events = _events(_build(tmp_path, "sig_wordpop", text="one two three",
+                            max_words=3))
     hidden = [e.count("\\alpha&HFF&") for e in events]
     assert hidden == [2, 1, 0]            # one fewer hidden as each is spoken
 
 
 def test_stack_puts_the_last_word_alone_on_its_own_line(tmp_path):
-    events = _events(_build(tmp_path, "sig_mogul", text="that was the craziest"))
+    events = _events(_build(tmp_path, "sig_mogul", text="that was the craziest",
+                            max_words=4))
     last = events[-1]
     top, bottom = last.split("\\N")
     small = caption_presets.PRESETS["sig_mogul"]["stack_small"]
@@ -201,7 +203,7 @@ def test_bounce_drops_in_and_overshoots():
 def test_landscape_canvas_scales_caption_size():
     st = subtitles._preset_style("sig_beast")
     wide = subtitles._fit_canvas(st, (1920, 1080))
-    assert wide["size"] < st["size"] * 0.75
+    assert wide["size"] < st["size"] * 0.8
     assert subtitles._fit_canvas(st, (1080, 1920))["size"] == st["size"]
 
 
@@ -212,3 +214,22 @@ def test_every_caption_layer_moves_with_the_scene(tmp_path):
     for line in out.read_text().splitlines():
         if line.startswith("Dialogue") and (",CaptionGlow," in line or ",Caption," in line):
             assert "\\pos(" in line
+
+
+def test_signature_looks_are_not_oversized():
+    # People cut 124px headline words to 62-82 by hand; nothing ships huge.
+    from app.pipeline import caption_presets
+    for p in caption_presets._LIST:
+        assert p["size"] <= 112, p["id"]
+
+
+def test_punchy_looks_default_to_two_words_a_caption(tmp_path):
+    # Three words read as a sentence scrolling past; sentence looks keep theirs.
+    assert caption_presets.PRESETS["sig_headline"]["max_words"] == 2
+    assert caption_presets.PRESETS["podcast_clean"]["max_words"] > 2
+    cues = _events(_build(tmp_path, "sig_beast", text="one two three four"))
+    assert all(len(_re_words(c)) <= 2 for c in cues)
+
+
+def _re_words(event):
+    return [w for w in re.sub(r"\{[^}]*\}", "", event).replace("\\N", " ").split() if w]

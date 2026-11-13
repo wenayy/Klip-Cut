@@ -158,6 +158,7 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                   speed_pitched: bool = False, background: str = None,
                   caption_color: str = None, caption_active_color: str = None,
                   captions_on: bool = True,
+                  keyword_captions: bool = None,
                   title_style: str = None, title_font: str = None,
                   title_size: int = None,
                   tighten_pauses: bool = None,
@@ -323,19 +324,31 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
         # CURRENT words, so storing it would put marks on the wrong lines the
         # moment a caption was edited. This also fixes the older bug where every
         # re-export silently dropped the emoji the first render had.
+        # Captions off keeps the keyword pop-ups unless the clip asks for a
+        # clean picture (the same rule as the first render).
+        popups = (not captions_on and not translate_to and bool(caption_words)
+                  and (options.get("keyword_captions", True)
+                       if keyword_captions is None else bool(keyword_captions)))
+        # A pop-up is a whole keyword phrase, not the look's 2-word beat.
+        cue_words = words_per_cue or (subtitles.POPUP_MAX_WORDS if popups else None)
+        if popups:
+            caption_words = subtitles.keyword_popups(caption_words, clip.keywords)
+        elif not captions_on:
+            # No captions, no pop-ups: nothing to hang an emoji on either.
+            caption_words = []
         use_emoji = (options.get("auto_emoji", True)
                      if auto_emoji is None else bool(auto_emoji))
         cue_emoji = (caption_emoji.plan(caption_words, style,
-                                       max_words=words_per_cue)
+                                       max_words=cue_words, popups=popups)
                      if use_emoji and caption_words else {})
         # Color emoji are composited as PNGs; the ones without a bundled asset
         # stay as monochrome glyphs inside the subtitle file.
         inline_emoji, emoji_overlays = emoji_overlay.plan_overlays(
             cue_emoji, caption_words, style, (out_w, out_h), margin_v,
-            caption_offset, max_words=words_per_cue,
+            caption_offset, max_words=cue_words,
             positions=caption_positions)
         subtitle_path = None
-        if captions_on and caption_words:
+        if (captions_on or popups) and caption_words:
             subtitle_path = os.path.join(job_dir, f"clip_{index + 1}.ass")
             if translate_to:
                 utt_lines = []
@@ -369,7 +382,7 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                                     title_style=title_style, title_font=title_font,
                                     title_size=title_size,
                                     cue_emoji=inline_emoji,
-                                    max_words=words_per_cue,
+                                    max_words=cue_words,
                                     positions=caption_positions,
                                     lock_margin=lock_margin)
         elif has_title:

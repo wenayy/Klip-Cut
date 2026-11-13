@@ -138,3 +138,38 @@ def test_adaptive_filter_concatenates_scenes():
     assert "trim=start=0.000:end=2.000" in graph
     assert "xstack=inputs=2" in graph
     assert "concat=n=2:v=1:a=0[framed]" in graph
+
+
+def test_close_webcams_in_a_call_split_evenly_not_reaction(monkeypatch):
+    # A 640x360 two-person call: each webcam face is half the frame tall. The
+    # 38% reaction strip could only show ~1.2 face-heights, cutting the
+    # listener's chin for the whole clip.
+    samples = [(i * 0.5, [_face(0.12, y=0.45, w=0.2, h=0.48),
+                          _face(0.75, y=0.45, w=0.22, h=0.52)])
+               for i in range(6)]
+    words = [{"start": 0.0, "end": 2.8, "speaker": 0},
+             {"start": 2.8, "end": 3.0, "speaker": 1}]
+    monkeypatch.setattr(
+        reframe, "detect_faces", lambda *args, **kwargs: (samples, (640, 360)))
+    plan = reframe.plan("unused.mp4", 0.0, 3.0, 1080, 1920, speaker_words=words)
+    scene = plan["scenes"][0]
+    assert scene["mode"] == "split"
+    assert [t["rect"][3] for t in scene["tiles"]] == [0.5, 0.5]
+
+
+def test_crops_stay_inside_their_half_of_a_call():
+    # The tall tile's resolution floor used to widen the crop past the seam, so
+    # a strip of the other caller's feed ran down the frame edge.
+    samples = [(i * 0.5, [_face(0.24, w=0.2, h=0.48), _face(0.74, w=0.2, h=0.48)])
+               for i in range(6)]
+    tracks = reframe.build_tracks(samples)
+    regions = reframe._participant_regions(tracks, 640)
+    assert sorted(regions.values()) == [(0.0, 320.0), (320.0, 640.0)]   # the seam
+    for track in tracks:
+        low, high = regions[id(track)]
+        tile = reframe.tile_window(track, (0.0, 0.0, 1.0, 0.62),
+                                   (low, high), 640, 360, 1080, 1920)
+        w = tile["win"][0]
+        assert w <= high - low
+        for _, cx, _ in tile["keys"]:
+            assert low - 1e-6 <= cx - w / 2 and cx + w / 2 <= high + 1e-6

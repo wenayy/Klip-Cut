@@ -335,6 +335,10 @@ class JobRequest(BaseModel):
     voice: str = "onyx"
     language: str = "English"
     burn_subtitles: bool = True
+    # With captions off, still pop up the clip's keyword phrases and emoji.
+    # Full captions on every line can be too much; nothing at all loses the
+    # point of the clip. False is a truly clean picture.
+    keyword_captions: bool = True
     burn_title: bool = True
     template: str = "auto"          # key into TEMPLATES
     caption_style: str = "karaoke_fill"  # independent of the frame layout
@@ -383,6 +387,7 @@ class JobRequest(BaseModel):
     highlight_minutes: Optional[float] = None
     highlight_memes: bool = True     # reaction beats after the biggest moments
     highlight_tags: bool = True      # "12 MIN LATER" where the video skips ahead
+    highlight_music: bool = True     # a royalty-free bed, ducked under speech
     # Transcribe speech that switches language mid-sentence with the model that
     # can follow it. Off by default and gated on the plan -- see billing.allows.
     multilingual: bool = False
@@ -1305,6 +1310,7 @@ class ClipRecipe(BaseModel):
     caption_color: Optional[str] = None     # CSS hex for the resting text
     caption_active_color: Optional[str] = None   # CSS hex for the spoken word
     captions_on: Optional[bool] = None      # False = export with no captions
+    keyword_captions: Optional[bool] = None # with captions off: keyword pop-ups
     auto_emoji: Optional[bool] = None       # False = export without emoji
     words_per_cue: Optional[int] = None     # 1/2/3 words per caption cue
     auto_zoom: Optional[bool] = None        # punch-in on key words
@@ -1560,6 +1566,7 @@ def export_clip(job_id: str, index: int,
                 caption_color=recipe.get("caption_color"),
                 caption_active_color=recipe.get("caption_active_color"),
                 captions_on=recipe.get("captions_on", True),
+                keyword_captions=recipe.get("keyword_captions"),
                 auto_emoji=recipe.get("auto_emoji"),
                 words_per_cue=recipe.get("words_per_cue"),
                 auto_zoom=recipe.get("auto_zoom"),
@@ -2564,6 +2571,20 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
         use_sfx = req.auto_sfx and not highlight_video
         use_zoom = req.auto_zoom and not highlight_video
 
+        if highlight_video and frame == "blur":
+            # Watch-along and stream parts: find the streamer's webcam overlay
+            # so the edit can enlarge it next to what they are reacting to.
+            update_job(job_id, progress_message="Finding the streamer's camera...")
+            for clip in resolved_clips:
+                try:
+                    info = content.analyze(video_path, clip["start"], clip["end"])
+                    cam = (info["facecam"] if info["kind"] == "gameplay_facecam"
+                           else content.corner_facecam(info["samples"], *info["src"]))
+                    if cam:
+                        clip["pip"] = highlight.pip_for(cam, *info["src"], out_w, out_h)
+                except Exception as exc:
+                    print(f"[clipper] highlight: facecam check skipped ({exc})")
+
         def part_name(i: int) -> str:
             return (f"{highlight.WORK_PREFIX}seg_{i}.mp4" if highlight_video
                     else f"clip_{i}.mp4")
@@ -2667,12 +2688,22 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
             emoji_overlays = []
             if req.mode == "original":
                 clip_title = clip.get("title", "") if burn_title else ""
-                if req.burn_subtitles and clip_words:
+                popups = (not req.burn_subtitles and req.keyword_captions
+                          and bool(clip_words))
+                # A pop-up is a whole keyword phrase (up to 3 words), not the
+                # look's 2-word beat, unless the person set words per cue.
+                cue_words = req.words_per_cue or (
+                    subtitles.POPUP_MAX_WORDS if popups else None)
+                if popups:
+                    caption_words = subtitles.keyword_popups(
+                        caption_words, clip.get("keywords"))
+                if (req.burn_subtitles or popups) and caption_words:
                     subtitle_path = os.path.join(job_dir, f"clip_{i}.ass")
                     caption_preset_id = caption_presets.get(req.caption_style)["id"]
                     cue_emoji = (
                         caption_emoji.plan(caption_words, caption_preset_id,
-                                           max_words=req.words_per_cue)
+                                           max_words=cue_words,
+                                           popups=popups)
                         if req.auto_emoji else {}
                     )
                     # Color emoji are composited as PNGs; anything without a
@@ -2681,7 +2712,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                         cue_emoji, caption_words, caption_preset_id,
                         (out_w, out_h), clip_margin_v,
                         0.0 if segments else clip["start"],
-                        max_words=req.words_per_cue,
+                        max_words=cue_words,
                         positions=caption_positions)
                     subtitles.build_ass(caption_words,
                                         0.0 if segments else clip["start"], subtitle_path,
@@ -2691,7 +2722,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                                         title=clip_title,
                                         keywords=clip.get("keywords"),
                                         cue_emoji=inline_emoji,
-                                        max_words=req.words_per_cue,
+                                        max_words=cue_words,
                                         positions=caption_positions,
                                         lock_margin=lock_margin)
                 elif clip_title.strip():
@@ -2791,10 +2822,14 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                   "score": item["clip"].get("score") or 0,
                   "source_start": item["clip"]["start"],
                   "source_end": item["clip"]["end"],
-                  "words": _clip_timeline_words(item)} for item in prepared],
+                  "words": _clip_timeline_words(item),
+                  "pip": item["clip"].get("pip")} for item in prepared],
                 out_w, out_h, genre=genre, title=req.source_title or "",
                 memes=req.highlight_memes, tags=req.highlight_tags,
-                high_quality=bool(job_options.get("high_quality")))
+                high_quality=bool(job_options.get("high_quality")),
+                music_path=(music.track_for(genre, req.source_title or "", variant=1)
+                            if req.highlight_music else None),
+                music_gain=music.gain_for(genre))
             job_options = {**job_options, "highlight": info}
             update_job(job_id, options=job_options)
             print(f"[clipper] job {job_id}: highlight video {info['duration'] / 60:.1f} min, "

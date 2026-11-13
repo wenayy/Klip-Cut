@@ -26,6 +26,8 @@ from app.pipeline.analyzer import _openai_chat
 # Roughly one cue in three. Past that the emoji stop being emphasis and start
 # being wallpaper -- and the eye has nowhere to land.
 MAX_DENSITY = 0.14
+# Keyword pop-ups (captions off) are already only the lines that matter, and
+# the emoji is half of what is left on screen -- so most of them (3 in 5) get one.
 
 # Skin-tone modifiers and ZWJ sequences (families, professions, couples) are the
 # ones that fall apart: a font either lacks the composed glyph and draws the
@@ -41,11 +43,7 @@ genuinely reinforces what is being said -- a concrete object, a strong emotion,
 a number, a reaction. Skip cues that are connective tissue or filler, and skip
 cues that are already vivid without help.
 
-A referenced clip earning its keep marked roughly one cue in ten. Treat that as
-the target, not a ceiling: most cues should get nothing. An emoji that is merely
-adjacent to the topic ("a camera should follow the voice" -> a camera) is noise;
-mark only where the emoji carries the feeling or the object the line is actually
-about.
+{target}
 
 Rules:
 - Mark at most {budget} cues. Fewer is better than forcing them. If you are
@@ -138,7 +136,18 @@ _RULES_RE = tuple((re.compile(pattern, re.IGNORECASE), mark)
                   for pattern, mark in _EMOJI_RULES)
 
 
-def _local_plan(texts: list, budget: int, face: dict) -> dict:
+_SPARSE_TARGET = """A referenced clip earning its keep marked roughly one cue in ten. Treat that as
+the target, not a ceiling: most cues should get nothing. An emoji that is merely
+adjacent to the topic ("a camera should follow the voice" -> a camera) is noise;
+mark only where the emoji carries the feeling or the object the line is actually
+about."""
+
+_POPUP_TARGET = """These cues are the clip's key phrases, shown on their own with no other
+captions, so the emoji carries the feeling of the moment. Mark most of them:
+pick the emoji for what the phrase means in context, not a literal object."""
+
+
+def _local_plan(texts: list, budget: int, face: dict, min_words: int = 2) -> dict:
     """Keyword-matched emoji for when the model is unavailable.
 
     One emoji per cue, only for cues that contain a concrete keyword, and never
@@ -150,7 +159,7 @@ def _local_plan(texts: list, budget: int, face: dict) -> dict:
     for index, text in enumerate(texts):
         if len(chosen) >= budget:
             break
-        if len(text.split()) < 2:
+        if len(text.split()) < min_words:
             continue
         for pattern, mark in _RULES_RE:
             # Never the same emoji twice in one clip. Two film reels on
@@ -171,11 +180,13 @@ def _cue_text(cue: list) -> str:
     ).strip()
 
 
-def plan(words: list, style: str = "classic", max_words: int = None) -> dict:
+def plan(words: list, style: str = "classic", max_words: int = None,
+         popups: bool = False) -> dict:
     """{cue index: emoji} for the cues worth marking. Empty dict on any problem.
 
     Cues are grouped here with the same rule build_ass uses, so the indices this
-    returns line up with the ones it iterates. Passing the map in -- rather than
+    returns line up with the ones it iterates. `popups` is the captions-off
+    mode: the words are keyword pop-ups only, and most of them earn an emoji. Passing the map in -- rather than
     calling the model from inside the renderer -- keeps build_ass free of
     network calls and testable without one.
     """
@@ -193,22 +204,26 @@ def plan(words: list, style: str = "classic", max_words: int = None) -> dict:
     if not any(texts):
         return {}
 
-    budget = max(1, int(len(cues) * MAX_DENSITY))
+    budget = (-(-len(cues) * 3 // 5) if popups              # ceil(0.6 n)
+              else max(1, int(len(cues) * MAX_DENSITY)))
+    min_words = 1 if popups else 2
     listing = "\n".join(f"{i}. {t}" for i, t in enumerate(texts) if t)
 
     try:
         from app.pipeline.analyzer import BULK_MODEL
         reply = _openai_chat(
-            _PROMPT.format(budget=budget, cues=listing), temperature=0.3,
+            _PROMPT.format(budget=budget, cues=listing,
+                           target=_POPUP_TARGET if popups else _SPARSE_TARGET),
+            temperature=0.3,
             model=BULK_MODEL)
     except (RuntimeError, ValueError) as exc:
         print(f"[clipper] emoji model unavailable ({exc}); using keyword "
               f"matching instead")
-        return _local_plan(texts, budget, face)
+        return _local_plan(texts, budget, face, min_words)
 
     raw = reply.get("emoji") if isinstance(reply, dict) else None
     if not isinstance(raw, dict):
-        return _local_plan(texts, budget, face)
+        return _local_plan(texts, budget, face, min_words)
 
     chosen = {}
     for key, mark in raw.items():

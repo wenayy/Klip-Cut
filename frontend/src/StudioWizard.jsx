@@ -376,6 +376,11 @@ export default function StudioWizard({
               <ToggleChip label="Captions" on={prefs.burnSubtitles}
                           onChange={prefs.setBurnSubtitles} testid="opt-captions"
                           title="Word-timed captions burned into the video" />
+              {!prefs.burnSubtitles && !isHighlight && (
+                <ToggleChip label="Keywords + emoji" on={prefs.keywordCaptions}
+                            onChange={prefs.setKeywordCaptions} testid="opt-keyword-captions"
+                            title="No full captions, but the key phrases still pop up with an emoji" />
+              )}
               {!isHighlight && (
                 <ToggleChip label="Title" on={prefs.burnTitle}
                             onChange={prefs.setBurnTitle} testid="opt-title"
@@ -428,6 +433,9 @@ export default function StudioWizard({
                   <ToggleChip label="Meme moments" on={prefs.highlightMemes}
                               onChange={prefs.setHighlightMemes} testid="opt-hl-memes"
                               title="A quick reaction beat after the biggest moments: a freeze, a punch-in, a caption and a sound" />
+                  <ToggleChip label="Background music" on={prefs.highlightMusic}
+                              onChange={prefs.setHighlightMusic} testid="opt-hl-music"
+                              title="A royalty-free music bed under the whole video, ducked whenever someone talks" />
                   <ToggleChip label="Time-jump tags" on={prefs.highlightTags}
                               onChange={prefs.setHighlightTags} testid="opt-hl-tags"
                               title={'"25 MIN LATER" where the video skips ahead, so viewers keep their place'} />
@@ -470,10 +478,12 @@ export default function StudioWizard({
           </div>
           )}
 
-          {prefs.burnSubtitles && (
+          {(prefs.burnSubtitles || (prefs.keywordCaptions && !isHighlight)) && (
             <div className="pref-group caption-pref-group">
               <span className="pref-group-label">Caption style</span>
-              <p className="pref-help">This style will be used in the generated video. Paid plans can change it later in the editor.</p>
+              <p className="pref-help">{prefs.burnSubtitles
+                ? "This style will be used in the generated video. Paid plans can change it later in the editor."
+                : "The keyword pop-ups use this style. Paid plans can change it later in the editor."}</p>
               <CaptionPresetPicker value={prefs.captionStyle}
                                    onChange={prefs.setCaptionStyle}
                                    data={captionData} />
@@ -532,7 +542,7 @@ export default function StudioWizard({
               : `${prefs.ratio} · ${templates.find((t) => t.id === prefs.template)?.name || prefs.template}`} />
             <Row label="Captions" value={prefs.burnSubtitles
               ? (captionData?.presets?.find((p) => p.id === prefs.captionStyle)?.name || "On")
-              : "Off"} />
+              : prefs.keywordCaptions && !isHighlight ? "Keywords + emoji only" : "Off"} />
             {!isHighlight && <Row label="Title" value={prefs.burnTitle ? "On" : "Off"} />}
             <Row label="Auto-censor" value={prefs.autoCensor ? "On" : "Off"} />
             <Row label="Tighten pauses"
@@ -544,6 +554,7 @@ export default function StudioWizard({
             {prefs.intent.trim() && <Row label="Looking for" value={prefs.intent.trim()} />}
             {isHighlight && <Row label="Meme moments" value={prefs.highlightMemes ? "On" : "Off"} />}
             {isHighlight && <Row label="Time-jump tags" value={prefs.highlightTags ? "On" : "Off"} />}
+            {isHighlight && <Row label="Background music" value={prefs.highlightMusic ? "On" : "Off"} />}
             <Row label="Quality" value={prefs.highQuality ? "High" : "Standard"} />
             <Row label="Model" value={prefs.advancedModel ? "Advanced" : "Standard"} />
 

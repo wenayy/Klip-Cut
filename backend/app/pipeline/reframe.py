@@ -112,6 +112,13 @@ STEADY_SPREAD = 0.45         # of the crop: wander allowed before a close-up tra
 # face because diarization labels do not identify image coordinates.
 REACTION_SPEECH_SHARE = 0.72
 REACTION_AREA_RATIO = 1.08
+# The reaction panel must show the listener's whole head: its crop is at least
+# this many face-heights tall (hair above the box, chin and a little neck), or
+# the scene splits. A close webcam in half a 640x360 call measured 1.2.
+REACTION_MIN_FACE_HEIGHTS = 1.9
+# Two faces whose midpoint is this close (of the width) to the frame's centre
+# are split at the centre, the seam of a side-by-side call.
+SEAM_SNAP = 0.06
 
 # Two people stay in one natural frame only when a true portrait crop can hold
 # both faces with headroom. Otherwise pretending they fit just cuts off both.
@@ -707,6 +714,13 @@ def _participant_regions(tracks, src_w):
     """A horizontal ownership region per simultaneously visible participant."""
     ordered = sorted(tracks, key=_track_mean_x)
     centres = [_track_mean_x(tr) * src_w for tr in ordered]
+    if len(centres) == 2 and abs((centres[0] + centres[1]) / 2 - src_w / 2) < src_w * SEAM_SNAP:
+        # Two people either side of the middle is almost always a call or a
+        # stream grid split exactly in half. The midpoint of their faces lands
+        # a few pixels off the true seam -- and those pixels of the other feed
+        # show as a stripe once the tile is upscaled 3x.
+        centres = [src_w / 2 - (centres[1] - centres[0]) / 2,
+                   src_w / 2 + (centres[1] - centres[0]) / 2]
     regions = {}
     for i, (track, centre) in enumerate(zip(ordered, centres)):
         low = 0.0 if i == 0 else (centres[i - 1] + centre) / 2
@@ -795,6 +809,12 @@ def tile_window(track, rect, region, src_w, src_h, out_w, out_h):
     if win_h > src_h:
         win_h = src_h
         win_w = min(src_w, win_h * aspect)
+    # The ownership region is a hard limit, not a starting width: the tall
+    # branch's resolution floor could widen a crop past it, which put a strip
+    # of the other caller's feed down the edge of every frame.
+    if win_w > region_w:
+        win_w = region_w
+        win_h = win_w / aspect
 
     xs = smooth(track["points"], key=1)
     ys = smooth(track["points"], key=2)
@@ -1423,6 +1443,19 @@ def _scene(samples, requested_count, start, end, src_w, src_h, out_w, out_h,
                         main = tracks[spoken.index(max(spoken))]
                 tracks = [main] + [tr for tr in tracks if tr is not main]
                 mode = "reaction"
+                # The reaction panel is a wide strip (1080x730). From a
+                # side-by-side call, where each person owns half the width,
+                # that strip can be ~1.2 face-heights tall: the listener's
+                # chin was cut off for a whole clip. Fall back to an even
+                # split unless the strip can hold their head.
+                small = tile_window(tracks[1], _layout_rects(2, mode)[1],
+                                    _participant_regions(tracks, src_w)[id(tracks[1])],
+                                    src_w, src_h, out_w, out_h)
+                face_h = (sum(p[4] for p in tracks[1]["points"])
+                          / len(tracks[1]["points"]) * src_h)
+                if small["win"][1] < face_h * REACTION_MIN_FACE_HEIGHTS:
+                    tracks.sort(key=_track_mean_x)
+                    mode = "split"
             else:
                 mode = "split"
             rects = _layout_rects(2, mode)

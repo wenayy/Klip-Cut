@@ -52,6 +52,16 @@ def path_for(genre: str = "", title: str = "", variant: int = 0) -> str | None:
     return path if os.path.exists(path) else None
 
 
+def track_for(genre: str = "", title: str = "", variant: int = 0) -> str | None:
+    """A real track from the library, or None -- never a generated loop.
+
+    The built-in loops pass under a 30-second clip; under a 12-minute
+    highlight video they read as cheap. Long-form gets real music or none.
+    """
+    path = path_for(genre, title, variant)
+    return path if path and os.path.dirname(path) != MUSIC_DIR else None
+
+
 def gain_for(genre: str = "") -> float:
     """Bed level before ducking. Gameplay needs less; it has its own audio."""
     return 0.12 if (genre or "").lower() == "gaming" else 0.17

@@ -96,3 +96,52 @@ def test_highlight_is_priced_by_finished_minutes():
                                 + billing.HIGH_QUALITY_PER_HIGHLIGHT_MINUTE)
                            + billing.ADVANCED_MODEL_PER_JOB)
     assert billing.highlight_breakdown(300)["total"] == billing.credits_for_highlight(300)
+
+
+def test_every_part_has_both_tracks_pinned_to_one_length():
+    # The lip-sync bug: each part's audio was a few ms off its video, and the
+    # error stacked at every crossfade. Both tracks are now cut to one length.
+    plan = highlight.timeline(_parts(3, length=21.37), memes=False)
+    graph = highlight.join_graph(plan, {}, 1920, 1080)
+    for k in range(3):
+        assert f"[{k}:v]trim=0:21.370,setpts=PTS-STARTPTS" in graph
+        assert "apad,atrim=0:21.370,asetpts=PTS-STARTPTS" in graph
+
+
+def test_parts_move_and_punch_in_only_where_planned():
+    still = {"duration": 10.0}
+    assert highlight._motion(still, 1920, 1080) == ""
+    moving = highlight._motion({"duration": 10.0, "motion": -1, "punch": 4.0}, 1920, 1080)
+    assert "eval=frame" in moving and "crop=1920:1080" in moving and "(t-4.00)" in moving
+
+
+def test_music_bed_is_ducked_under_speech():
+    plan = highlight.timeline(_parts(2), memes=False)
+    graph = highlight.join_graph(plan, {}, 1920, 1080, music_input=5, music_gain=0.12)
+    assert "[5:a]" in graph and "sidechaincompress" in graph and "volume=0.120" in graph
+
+
+def test_watch_along_cam_is_found_in_its_corner_and_enlarged():
+    from app.pipeline import content
+    # streamer cam pinned bottom-right; a face in the watched video moves around
+    samples = [(t * 0.5, [(0.93, 0.83, 0.06, 0.12, 0.9), (0.25 + 0.01 * (t % 5), 0.35, 0.08, 0.15, 0.9)])
+               for t in range(40)]
+    cam = content.corner_facecam(samples, 1280, 720)
+    assert cam and cam["centre"][0] > 1100 and cam["focus"][0] < 500
+    pip = highlight.pip_for(cam, 1280, 720, 1920, 1080)
+    assert pip["box"][0] > 960 and pip["box"][2] >= 0.29 * 1920      # big, same corner
+    assert pip["zoom"][0] == 0                                         # push toward the left content
+    plan = highlight.timeline([{**_parts(1)[0], "pip": pip}] + _parts(1), memes=False)
+    assert "overlay=" in highlight.join_graph(plan, {}, 1920, 1080)
+
+
+def test_a_single_face_is_never_a_watch_along_cam():
+    from app.pipeline import content
+    samples = [(t * 0.5, [(0.93, 0.83, 0.06, 0.12, 0.9)]) for t in range(40)]
+    assert content.corner_facecam(samples, 1280, 720) is None
+
+
+def test_landscape_captions_sit_low():
+    from app.pipeline import render
+    assert render.caption_margin_v(1280, 720, 1920, 1080) == int(1080 * 0.08)
+    assert render.caption_margin_v(1280, 720, 1080, 1920) > 1920 * 0.2   # vertical unchanged

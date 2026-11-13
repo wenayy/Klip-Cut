@@ -628,6 +628,61 @@ def frame_motion(video_path, start, end, fps=MOTION_FPS, width=MOTION_WIDTH):
 # Facecam
 # --------------------------------------------------------------------------
 
+CORNER_EDGE = 0.22          # a cam overlay sits within this of two frame edges
+CORNER_MAX_FACE = 0.22      # ...and is small
+CORNER_COVERAGE = 0.7       # ...and is there almost the whole time
+
+
+def corner_facecam(samples, src_w, src_h):
+    """A streamer's webcam overlay in a watch-along, or None.
+
+    `find_facecam` wants one small face over moving content. A watch-along has
+    other faces too -- the people in the video being watched -- so it reads as
+    a conversation and finds no cam. The streamer's cam is still recognisable:
+    a small face, present in nearly every sample, pinned in a CORNER of the
+    frame while the other faces move around the middle.
+    Returns find_facecam's shape: {"centre": (x, y), "win": (w, h)} in pixels.
+    """
+    if not samples or not src_w or not src_h:
+        return None
+    tracks = reframe.build_tracks(samples)
+    if len(tracks) < 2:
+        return None                     # one face is a talking head, not a cam
+    total = len(samples)
+    best = None
+    for tr in tracks:
+        pts = tr["points"]
+        if len(pts) / total < CORNER_COVERAGE:
+            continue
+        cx = sum(p[1] for p in pts) / len(pts)
+        cy = sum(p[2] for p in pts) / len(pts)
+        fh = sum(p[4] for p in pts) / len(pts)
+        near_x = cx < CORNER_EDGE or cx > 1 - CORNER_EDGE
+        near_y = cy < CORNER_EDGE or cy > 1 - CORNER_EDGE
+        if fh > CORNER_MAX_FACE or not (near_x and near_y):
+            continue
+        if best is None or len(pts) > best[0]:
+            best = (len(pts), cx, cy, fh)
+    if not best:
+        return None
+    _, cx, cy, fh = best
+    # Where the watched video is: the other faces, weighted by how long they
+    # are on screen. An editor pushes in there.
+    others = [tr for tr in tracks
+              if abs(sum(p[1] for p in tr["points"]) / len(tr["points"]) - cx) > 0.05]
+    weight = sum(len(tr["points"]) for tr in others)
+    focus = None
+    if weight:
+        focus = (sum(sum(p[1] for p in tr["points"]) for tr in others) / weight * src_w,
+                 sum(sum(p[2] for p in tr["points"]) for tr in others) / weight * src_h)
+    # Head and shoulders of the overlay around the face, 4:3, inside the frame.
+    h = min(src_h, fh * src_h * 2.4)
+    w = min(src_w, h * 4 / 3)
+    x = min(max(cx * src_w, w / 2), src_w - w / 2)
+    y = min(max(cy * src_h + 0.15 * fh * src_h, h / 2), src_h - h / 2)
+    return {"centre": (x, y), "win": (w, h), "focus": focus}
+
+
 def find_facecam(samples, src_w, src_h):
     """Locate a stream's webcam overlay, or None.
 

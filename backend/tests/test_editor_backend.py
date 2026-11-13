@@ -103,6 +103,7 @@ def test_export_captions_off_writes_no_ass(client):
         "start": 0.0,
         "end": 5.0,
         "captions_on": False,
+        "keyword_captions": False,     # captions off alone keeps keyword pop-ups
         "caption_style": "vibrant_sunset",
     }
     r = client.put(f"{API}/jobs/{JOB_ID}/clips/0/edit", json=payload, timeout=30)
@@ -113,7 +114,7 @@ def test_export_captions_off_writes_no_ass(client):
     # Give FS a moment
     time.sleep(0.5)
     assert not os.path.exists(ass_path), (
-        "with captions_on=False no .ass should be written"
+        "with captions and keyword pop-ups off no .ass should be written"
     )
 
 

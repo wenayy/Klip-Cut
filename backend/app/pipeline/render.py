@@ -141,6 +141,16 @@ PLATFORM_UI_FRACTION = 0.17
 CAPTION_LIFT = 0.05
 
 
+# YouTube's controls cover a thin strip at the bottom, only while hovered --
+# not the ~22% that TikTok and Reels reserve. Applying the vertical floor to a
+# 16:9 frame lifted captions to mid-height, straight across the mic and chest.
+LANDSCAPE_CAPTION_FRACTION = 0.08
+
+
+def _landscape_margin(out_w: int, out_h: int):
+    return int(out_h * LANDSCAPE_CAPTION_FRACTION) if out_w > out_h else None
+
+
 def caption_margin_v(src_w: int, src_h: int, out_w: int = OUT_W, out_h: int = OUT_H) -> int:
     """Distance from the bottom of the output frame to the caption baseline.
 
@@ -149,6 +159,8 @@ def caption_margin_v(src_w: int, src_h: int, out_w: int = OUT_W, out_h: int = OU
     wins -- a perfectly placed caption hidden behind an Instagram like button is
     worth nothing.
     """
+    if _landscape_margin(out_w, out_h) is not None:
+        return _landscape_margin(out_w, out_h)
     floor = int(out_h * (PLATFORM_UI_FRACTION + CAPTION_LIFT))
 
     fg_h = content_height(src_w, src_h, out_w, out_h)
@@ -332,6 +344,8 @@ def podcast_caption_margin_v(src_w: int, src_h: int,
     corner of a very tall empty band. This centres them in the space actually
     left under the video, while still clearing the platform's UI.
     """
+    if _landscape_margin(out_w, out_h) is not None:
+        return _landscape_margin(out_w, out_h)
     fg_h = min(int(out_w * src_h / src_w), out_h) if src_w and src_h else out_h // 2
     top = max(0, min(out_h - fg_h, PODCAST_CONTENT_BIAS * out_h - fg_h / 2))
     band_top = top + fg_h                      # first free pixel under the video
@@ -758,6 +772,8 @@ def fit_caption_margin_v(src_w: int, src_h: int,
     assumption. Using that formula put captions well above the middle of the bar
     they are supposed to sit in.
     """
+    if _landscape_margin(out_w, out_h) is not None:
+        return _landscape_margin(out_w, out_h)
     fg_h = content_height(src_w, src_h, out_w, out_h) if src_w and src_h else out_h
     top = max(0, min(out_h - fg_h, FIT_CONTENT_BIAS * out_h - fg_h / 2))
     band_top = top + fg_h
