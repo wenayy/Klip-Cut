@@ -37,14 +37,17 @@ def test_panel_never_tiles_three_people():
     scene = reframe._scene(_samples([0.2, 0.5, 0.8]), 3, 0.0, 10.0,
                            1280, 720, 1080, 1920)
     scenes = scene if isinstance(scene, list) else [scene]
-    assert all(s["mode"] in ("single", "wide") for s in scenes)
+    assert all(s["mode"] in ("single", "wide", "split") for s in scenes)
+    assert not any(reframe.tiles_clash(s["tiles"]) for s in scenes)
 
 
 def test_small_faces_at_a_table_are_shown_whole():
     samples = [(t * 0.5, [(x, 0.4, 0.04, 0.07, 0.9) for x in (0.2, 0.5, 0.8)])
                for t in range(20)]
     scene = reframe._featured_scene(samples, 0.0, 10.0, 1280, 720, 1080, 1920)
-    assert scene["mode"] == "wide" and scene["tiles"] == []
+    # Everyone, once: the whole row, or the row in two non-overlapping halves.
+    assert scene["mode"] in ("wide", "split")
+    assert not reframe.tiles_clash(scene["tiles"])
 
 
 def test_layout_runs_split_at_source_cuts_and_flicker_is_absorbed():

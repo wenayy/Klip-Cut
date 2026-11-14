@@ -226,6 +226,30 @@ GENRES = {
                    "biggest genuine reaction -- a clutch, a fail, a scare, a laugh "
                    "-- over ones that are merely well explained. Short is good.\n\n"),
     },
+    # A vlog is a story told on the move: the clip is a beat of that story --
+    # a reveal, a surprise, a fail, a first reaction to a place -- and it has
+    # to make sense without the rest of the trip.
+    "vlog": {
+        "weights": {"hook": 0.26, "emotion": 0.22, "standalone": 0.18,
+                    "payoff": 0.14, "ending": 0.12, "share": 0.08},
+        "brief": "",
+        "select": ("This is a vlog. Prefer self-contained story beats with a "
+                   "visible moment -- a reveal, a surprise, a first reaction to "
+                   "a place, something going wrong, a funny exchange between "
+                   "the people in it -- over narration, logistics (packing, "
+                   "booking, travel times) or greetings to the camera.\n\n"),
+    },
+    # A joke is a setup and a punchline, and the laugh is part of it.
+    "comedy": {
+        "weights": {"payoff": 0.26, "hook": 0.22, "emotion": 0.18,
+                    "standalone": 0.16, "ending": 0.12, "share": 0.06},
+        "brief": "",
+        "select": ("This is a comedy show (stand-up, roast or panel). Pick "
+                   "complete bits: the setup that makes the punchline land, "
+                   "the punchline, and the room's laugh after it. Prefer the "
+                   "biggest laughs and the sharpest comebacks; never start "
+                   "mid-joke or end before the punchline.\n\n"),
+    },
 }
 
 

@@ -287,9 +287,12 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
         use_tightening = (options.get("tighten_pauses", True)
                           if tighten_pauses is None else tighten_pauses)
         if use_tightening and words:
+            # Loudness keeps laughs and reactions that have no words in them.
+            from app.pipeline import energy
             tightened, remapped, removed = pacing.tighten(
                 words, start, end,
-                max_pause=pacing.max_pause_for_frame(tpl["frame"]))
+                max_pause=pacing.max_pause_for_frame(tpl["frame"]),
+                rms=energy.window_rms(source, start, end + 0.5))
             # The same floor the pipeline uses: under this, a re-cut buys
             # nothing and costs a seam.
             if tightened and removed >= 0.4:

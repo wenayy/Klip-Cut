@@ -66,7 +66,7 @@ def test_similar_faces_never_hop_the_home_shot_between_people():
                           for k, x in enumerate((0.2, 0.5, 0.8))])
                for t in range(20)]
     scene = reframe._featured_scene(samples, 0.0, 10.0, 1920, 1080, 1080, 1920)
-    assert scene["mode"] == "wide"
+    assert scene["mode"] in ("wide", "split") and not reframe.tiles_clash(scene["tiles"])
 
 
 def test_one_dominant_face_is_the_home_shot_and_holds_still():

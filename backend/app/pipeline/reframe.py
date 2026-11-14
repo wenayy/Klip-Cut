@@ -94,9 +94,9 @@ GROUP_HOLD_SECONDS = 4.0     # a silence shorter than this keeps the last speake
 FEATURE_MIN_FACE = 0.14      # face height (share of frame) worth a close-up
 MAP_MOTION_RATIO = 1.8      # their mouth vs the average other mouth
 MAP_MIN_SHARE = 0.35        # of a speaker's words their mouth must visibly own
-HALVES_MIN_PEOPLE = 4        # a row this long letterboxes into a thin strip
+HALVES_MIN_PEOPLE = 3        # a row this long letterboxes into a thin strip
 HALVES_MIN_COVERAGE = 0.8    # share of samples each person must appear in
-HALVES_MAX_FACE = 0.2        # bigger faces mean a medium shot, not a wide row
+HALVES_MAX_FACE = 0.3        # bigger faces mean a medium shot, not a wide row
 FEATURE_DOMINANCE = 1.8      # face AREA over the next one before a shot is "of" them
 
 # Speaker switching, as multicam podcast editors cut and as automated

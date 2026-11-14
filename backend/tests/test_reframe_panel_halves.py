@@ -18,7 +18,13 @@ def test_wide_panel_row_is_split_and_stacked():
 
 
 def test_medium_shot_or_small_group_keeps_old_layout():
-    assert reframe._halves_scene(_row([0.3, 0.5, 0.7]), 20,
+    assert reframe._halves_scene(_row([0.3, 0.7]), 20,
                                  0, 10, 1920, 1080, 1080, 1920) is None
-    assert reframe._halves_scene(_row([0.2, 0.4, 0.6, 0.8], h=0.3), 20,
+    assert reframe._halves_scene(_row([0.2, 0.4, 0.6, 0.8], h=0.35), 20,
                                  0, 10, 1920, 1080, 1080, 1920) is None
+
+
+def test_three_person_medium_shot_fills_frame():
+    scene = reframe._halves_scene(_row([0.25, 0.5, 0.75], h=0.22), 20,
+                                  0, 10, 1920, 1080, 1080, 1920)
+    assert scene and scene["mode"] == "split"

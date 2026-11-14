@@ -63,6 +63,8 @@ SCENE_THRESHOLD = 0.32    # ffmpeg scene score for "this is a cut".
 # from a vlog close-up: the latter fills a third of the frame.
 FACECAM_MAX_FACE = 0.16
 FACECAM_MIN_COVERAGE = 0.45
+FACECAM_CENTRE_X = 0.15     # |x - 0.5| below this and ...
+FACECAM_CENTRE_Y = (0.2, 0.7)  # ... y inside this band = a vlog face, not a webcam
 FACECAM_MAX_DRIFT = 0.045   # std-dev of centre, as a fraction of the frame
 # The rest of the frame has to be moving like a game, not like a person
 # gesturing. At 0.010 a medium talking-head shot qualified: the presenter's
@@ -430,6 +432,19 @@ GAMING_TITLE_WORDS = (
     "nintendo switch", "rtx", "4k 60fps", "boss fight", "ranked", "1v1",
     "full game", "stream highlights", "funny moments",
 )
+# Checked before the podcast words: "INDIA'S GOT LATENT S2 EP5" is a comedy
+# show, not an interview, even though it says "ep".
+COMEDY_TITLE_WORDS = (
+    "latent", "roast", "stand-up", "standup", "stand up", "comedy", "comedian",
+    "open mic", "crowd work", "sketch", "prank",
+)
+VLOG_TITLE_WORDS = (
+    "vlog", "trip", "travel", "tour", "day in", "24 hours", "exploring",
+    "visiting", "went to", "road trip", "surprise", "family",
+)
+# Untitled uploads: words a vlogger says to the camera.
+VLOG_SPEECH_CUES = ("vlog", "trip", "guys", "packing", "flight", "airport",
+                    "hotel", "reach", "pahunch")
 PODCAST_TITLE_WORDS = (
     "podcast", "interview", "episode", " ep.", " ep ", "talk", "conversation",
     "q&a", "ama", "keynote", "lecture", "debate", "fireside", "explains",
@@ -438,6 +453,7 @@ PODCAST_TITLE_WORDS = (
 # something else rather than the content itself. A two-person podcast sits near
 # 0.9 and a solo essay near 0.8; a streamer reacting to a game lands at 0.2-0.5.
 GAMING_SPEECH_COVERAGE = 0.45
+VLOG_CUE_RATE = 0.004       # ~1 travel/camera word in 250
 
 
 def speech_coverage(utterances, duration):
@@ -449,17 +465,26 @@ def speech_coverage(utterances, duration):
 
 
 def guess_genre(utterances, duration, title=""):
-    """"gaming", "podcast" or "general" for a source, from title and speech."""
+    """"gaming", "comedy", "vlog", "podcast" or "general", from title and speech."""
     text = f" {(title or '').lower()} "
     if any(word in text for word in GAMING_TITLE_WORDS):
         return "gaming"
     coverage = speech_coverage(utterances, duration)
+    if any(word in text for word in COMEDY_TITLE_WORDS):
+        return "comedy"
+    if any(word in text for word in VLOG_TITLE_WORDS):
+        return "vlog"
     if any(word in text for word in PODCAST_TITLE_WORDS) and coverage >= 0.5:
         return "podcast"
     if coverage < GAMING_SPEECH_COVERAGE:
         return "gaming"
     # Sustained speech from more than one voice is a conversation. One voice
     # could be an essay, a tutorial or a vlog, which the general rubric fits.
+    said = " ".join((u.get("transcript") or u.get("text") or "") for u in utterances).lower()
+    spoken = said.split()
+    cues = sum(spoken.count(w) for w in VLOG_SPEECH_CUES)
+    if spoken and cues / len(spoken) >= VLOG_CUE_RATE:
+        return "vlog"
     speakers = {u.get("speaker") for u in utterances if u.get("speaker") is not None}
     return "podcast" if len(speakers) >= 2 else "general"
 
@@ -739,6 +764,13 @@ def find_facecam(samples, src_w, src_h):
     if coverage < FACECAM_MIN_COVERAGE:
         return None
     if std_x > FACECAM_MAX_DRIFT or std_y > FACECAM_MAX_DRIFT:
+        return None
+    # A webcam overlay sits in a corner or along an edge, out of the game's
+    # way. A face in the middle of a moving frame is a handheld vlog -- the
+    # camera shakes, the face stays put -- and the facecam layout shrank it
+    # into a box over a blurred strip.
+    if (abs(mean_x - 0.5) < FACECAM_CENTRE_X
+            and FACECAM_CENTRE_Y[0] < mean_y < FACECAM_CENTRE_Y[1]):
         return None
 
     # The overlay is roughly 2.5 face-widths across. Clamped so a distant face

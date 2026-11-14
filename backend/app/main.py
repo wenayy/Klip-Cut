@@ -124,7 +124,7 @@ def _render_slot(job_id: str = None, wait: float = None):
 
 # "auto" is resolved per job by content.guess_genre; the rest name a rubric in
 # analyzer.GENRES directly.
-GENRE_CHOICES = ("auto", "general", "podcast", "gaming")
+GENRE_CHOICES = ("auto", "general", "podcast", "gaming", "vlog", "comedy")
 OUTPUT_CHOICES = ("clips", "highlight")
 HIGHLIGHT_TOO_SHORT = ("This video is too short for a highlight video -- it needs "
                        "at least 8 minutes to condense. Make clips from it instead; "
