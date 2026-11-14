@@ -92,6 +92,9 @@ CLASH_OVERLAP = 0.12
 GROUP_MIN_SPEECH = 0.20      # share of the scene the speaker shots must cover
 GROUP_HOLD_SECONDS = 4.0     # a silence shorter than this keeps the last speaker
 FEATURE_MIN_FACE = 0.14      # face height (share of frame) worth a close-up
+HALVES_MIN_PEOPLE = 4        # a row this long letterboxes into a thin strip
+HALVES_MIN_COVERAGE = 0.8    # share of samples each person must appear in
+HALVES_MAX_FACE = 0.2        # bigger faces mean a medium shot, not a wide row
 FEATURE_DOMINANCE = 1.8      # face AREA over the next one before a shot is "of" them
 
 # Speaker switching, as multicam podcast editors cut and as automated
@@ -667,6 +670,10 @@ def _track_area(track):
     return sum(p[3] * p[4] for p in track["points"]) / len(track["points"])
 
 
+def _track_mean_height(track):
+    return sum(p[4] for p in track["points"]) / len(track["points"])
+
+
 def _track_mean_width(track):
     return sum(p[3] for p in track["points"]) / len(track["points"])
 
@@ -1226,7 +1233,70 @@ def _featured_scene(samples, start, end, src_w, src_h, out_w, out_h):
                     >= FEATURE_DOMINANCE * _track_area(tracks[1]))
         if face_h >= FEATURE_MIN_FACE and dominant:
             return _speaker_single(lead, start, end, src_w, src_h, out_w, out_h)
-    return _group_scene(start, end)
+    return (_halves_scene(tracks, len(inside), start, end,
+                          src_w, src_h, out_w, out_h)
+            or _group_scene(start, end))
+
+
+def _halves_scene(tracks, n_samples, start, end, src_w, src_h, out_w, out_h):
+    """A wide panel cut in two and stacked: left half on top, right below.
+
+    Letterboxing a five-person table into a 9:16 frame leaves a thin strip of
+    tiny faces over a blurred band. Cutting the row at the widest gap between
+    two people and stacking the halves shows everyone once, about twice as
+    large, and fills the frame. Returns None when there is no clean gap.
+
+    Only for one steady wide angle: every person present nearly throughout and
+    every face small. A multi-camera show that cuts to a medium shot inside
+    the scene would get a fixed crop that slices people in half.
+    """
+    if len(tracks) < HALVES_MIN_PEOPLE:
+        return None
+    if any(len(tr["points"]) < HALVES_MIN_COVERAGE * n_samples
+           or _track_mean_height(tr) >= HALVES_MAX_FACE for tr in tracks):
+        return None
+    people = sorted(tracks, key=_track_mean_x)
+    xs = [_track_mean_x(tr) * src_w for tr in people]
+    half_w = [_track_mean_width(tr) * src_w / 2 for tr in people]
+    # The cut goes in a gap between faces: the most even head count per half,
+    # then the widest gap.
+    best, best_key = None, None
+    for i in range(1, len(people)):
+        gap = (xs[i] - half_w[i]) - (xs[i - 1] + half_w[i - 1])
+        if gap <= 0:
+            continue
+        key = (abs(i - len(people) / 2), -gap)
+        if best_key is None or key < best_key:
+            best, best_key = i, key
+    if best is None:
+        return None
+    cut = ((xs[best] - half_w[best]) + (xs[best - 1] + half_w[best - 1])) / 2
+    face_y = sum(p[2] for tr in people for p in tr["points"]) / sum(
+        len(tr["points"]) for tr in people) * src_h
+    face_h = sum(_track_mean_height(tr) for tr in people) / len(people) * src_h
+
+    aspect = out_w / (out_h / 2.0)          # each tile: full width, half height
+    pad = face_h * 1.2
+    sides = (((0.0, 0.0, 1.0, 0.5), 0.0, cut),
+             ((0.0, 0.5, 1.0, 0.5), cut, float(src_w)))
+    need = []
+    for _, lo, hi in sides:
+        group = [x for x in xs if lo <= x < hi]
+        if not group:
+            return None
+        need.append((max(lo, min(group) - pad), min(hi, max(group) + pad)))
+    # One zoom for both halves, so the two rows of people match in size.
+    width = min(max(r - l for l, r in need), src_h * aspect)
+    tiles = []
+    for (rect, lo, hi), (left, right) in zip(sides, need):
+        win_w = min(width, hi - lo)
+        win_h = win_w / aspect
+        cx = min(max((left + right) / 2, lo + win_w / 2), hi - win_w / 2)
+        # Faces in the upper third of the tile, chest and table below.
+        cy = min(max(face_y + win_h * 0.18, win_h / 2), src_h - win_h / 2)
+        tiles.append({"rect": rect, "win": [round(win_w), round(win_h)],
+                      "keys": [[start, cx, cy], [end, cx, cy]]})
+    return {"start": start, "end": end, "mode": "split", "tiles": tiles}
 
 
 def _group_scene(start, end):
