@@ -251,6 +251,11 @@ FILLER_OPENERS = {
 _MODEL_REJECTS_TEMPERATURE = set()
 
 
+class ModelAuthError(RuntimeError):
+    """The model provider refused the key. Never papered over by a fallback:
+    mechanical clips from a misconfigured key look like a quality collapse."""
+
+
 def _openai_chat(prompt: str, retries: int = 2, temperature: float = 0.4,
                  model: str = None) -> dict:
     # Passed down from the job rather than read from the module, so two jobs on
@@ -282,7 +287,7 @@ def _openai_chat(prompt: str, retries: int = 2, temperature: float = 0.4,
                       f"temperature -- using the model default from here on.")
                 continue
             if resp.status_code in (401, 403):
-                raise RuntimeError(
+                raise ModelAuthError(
                     "OpenAI rejected the API key. Check OPENAI_API_KEY in "
                     "backend/.env."
                 )
@@ -982,7 +987,7 @@ def highlight_candidates(utterances: list, on_progress=None, intent: str = "",
             length_guidance=HIGHLIGHT_GUIDANCE, model=model or BULK_MODEL,
             genre=genre)
     except RuntimeError as exc:
-        if not LLM_FALLBACK:
+        if not LLM_FALLBACK or isinstance(exc, ModelAuthError):
             raise
         print(f"[clipper] model unavailable ({exc}); highlight falls back to "
               f"mechanical speech runs")
@@ -1025,7 +1030,7 @@ def pick_clips(utterances: list, n_clips: int, on_progress=None,
             genre=genre,
         )
     except RuntimeError as exc:
-        if not LLM_FALLBACK:
+        if not LLM_FALLBACK or isinstance(exc, ModelAuthError):
             raise
         print(f"[clipper] model unavailable ({exc}); falling back to "
               f"mechanical speech runs for this job")
