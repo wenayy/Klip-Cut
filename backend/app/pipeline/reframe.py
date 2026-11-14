@@ -1266,10 +1266,13 @@ def _halves_scene(tracks, n_samples, start, end, src_w, src_h, out_w, out_h):
     every face small. A multi-camera show that cuts to a medium shot inside
     the scene would get a fixed crop that slices people in half.
     """
+    # The seated row is whoever is there nearly throughout; a face from a
+    # brief other angle or the audience is not a reason to give up the layout.
+    tracks = [tr for tr in tracks
+              if len(tr["points"]) >= HALVES_MIN_COVERAGE * n_samples]
     if len(tracks) < HALVES_MIN_PEOPLE:
         return None
-    if any(len(tr["points"]) < HALVES_MIN_COVERAGE * n_samples
-           or _track_mean_height(tr) >= HALVES_MAX_FACE for tr in tracks):
+    if any(_track_mean_height(tr) >= HALVES_MAX_FACE for tr in tracks):
         return None
     people = sorted(tracks, key=_track_mean_x)
     xs = [_track_mean_x(tr) * src_w for tr in people]
