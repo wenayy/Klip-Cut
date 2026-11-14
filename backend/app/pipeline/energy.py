@@ -43,6 +43,20 @@ def _decode_pcm(audio_path: str) -> bytes:
         return b""
 
 
+def window_rms(media_path: str, start: float, end: float) -> list[float]:
+    """RMS per FRAME_MS for [start, end) of a file, decoding only that range."""
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-v", "error", "-ss", f"{max(0.0, start):.3f}",
+             "-t", f"{max(0.1, end - start):.3f}", "-i", media_path, "-vn",
+             "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-"],
+            capture_output=True, timeout=120,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return []
+    return _frame_rms(out.stdout) if out.returncode == 0 else []
+
+
 # def _frame_rms(pcm: bytes) -> list:
 #     """RMS per FRAME_MS window across the whole file."""
 #     frame_bytes = int(SAMPLE_RATE * SAMPLE_WIDTH * FRAME_MS / 1000)

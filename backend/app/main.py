@@ -2613,6 +2613,19 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
             audio_override = None
             clip_words = clip["words"]
 
+            # Let a laugh or a cheer after the last line play out instead of
+            # stopping dead on the final word.
+            clip_rms = None
+            if (clip_words and genre != "gaming" and not clip.get("highlight")
+                    and req.mode != "voiceover"):
+                clip_rms = energy.window_rms(
+                    video_path, clip["start"], clip["end"] + pacing.RING_OUT_MAX + 0.5)
+                end = min(pacing.ring_out(clip_rms, clip["start"], clip_words, clip["end"]),
+                          source_seconds or float("inf"))
+                if end > clip["end"]:
+                    clip["end"] = end
+                    clip["duration"] = round(end - clip["start"], 2)
+
             clip_plan = None
             clip_margin_v = margin_v
             lock_margin = bool(gameplay_loops)
@@ -2657,7 +2670,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                     and not clip.get("highlight")):
                 segments, clip_words, removed = pacing.tighten(
                     clip_words, clip["start"], clip["end"],
-                    max_pause=pacing.max_pause_for_frame(frame))
+                    max_pause=pacing.max_pause_for_frame(frame), rms=clip_rms)
                 if removed < 0.4:
                     segments, clip_words = None, clip["words"]
                 else:

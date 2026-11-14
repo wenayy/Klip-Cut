@@ -92,6 +92,8 @@ CLASH_OVERLAP = 0.12
 GROUP_MIN_SPEECH = 0.20      # share of the scene the speaker shots must cover
 GROUP_HOLD_SECONDS = 4.0     # a silence shorter than this keeps the last speaker
 FEATURE_MIN_FACE = 0.14      # face height (share of frame) worth a close-up
+MAP_MOTION_RATIO = 1.8      # their mouth vs the average other mouth
+MAP_MIN_SHARE = 0.35        # of a speaker's words their mouth must visibly own
 HALVES_MIN_PEOPLE = 4        # a row this long letterboxes into a thin strip
 HALVES_MIN_COVERAGE = 0.8    # share of samples each person must appear in
 HALVES_MAX_FACE = 0.2        # bigger faces mean a medium shot, not a wide row
@@ -987,7 +989,21 @@ def speaker_spans(tracks, rows, words, start, end):
             # A split vote means the mapping is a coin flip, and a wrong
             # speaker cuts the clip to the person who is not talking. Demand a
             # clear winner instead.
-            if total >= 3 and tally[best] / total >= 0.6:
+            # A voice from off-camera (a host on stage, a crowd member) still
+            # collects a few votes from whoever laughs or nods along. Most of
+            # a visible speaker's words show a clearly moving mouth; demand
+            # that before a face is taken as the voice.
+            said = sum(1 for w in labelled if w["speaker"] == speaker)
+            if not (total >= 3 and tally[best] / total >= 0.6
+                    and tally[best] >= MAP_MIN_SHARE * said):
+                continue
+            # And their mouth must move clearly more than everyone else's over
+            # all of those words, not just win a string of near-ties.
+            mine = [w for w in labelled if w["speaker"] == speaker]
+            means = [sum(_mean_motion(rows, i, w["start"], w["end"]) for w in mine)
+                     / len(mine) for i in range(len(tracks))]
+            others = [m for i, m in enumerate(means) if i != best]
+            if means[best] >= MAP_MOTION_RATIO * (sum(others) / len(others)):
                 mapping[speaker] = best
 
         if mapping:

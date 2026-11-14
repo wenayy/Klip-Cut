@@ -50,7 +50,47 @@ def max_pause_for_frame(frame: str = None) -> float:
     return DEFAULT_MAX_PAUSE
 
 
-def plan_segments(words: list, max_pause: float = DEFAULT_MAX_PAUSE) -> list:
+# Laughter, cheering and applause have no words, so word gaps alone call them
+# dead air. A gap at least this loud relative to the talking is a reaction and
+# stays; the clip's end also rings out through one instead of stopping dead.
+LAUGH_RATIO = 0.55
+RING_OUT_MAX = 3.0
+RING_DIP = 0.6
+FRAME = 0.1
+
+
+def _speech_level(rms: list, origin: float, words: list) -> float:
+    vals = sorted(rms[int((w["start"] - origin) / FRAME)]
+                  for w in words
+                  if 0 <= int((w["start"] - origin) / FRAME) < len(rms))
+    return vals[len(vals) // 2] if vals else 0.0
+
+
+def _loud(rms, origin, a, b, level) -> bool:
+    i, j = int((a - origin) / FRAME), int((b - origin) / FRAME)
+    window = rms[max(0, i):max(0, j)]
+    return bool(window) and level > 0 and sum(window) / len(window) >= LAUGH_RATIO * level
+
+
+def ring_out(rms: list, origin: float, words: list, end: float) -> float:
+    """The clip end pushed past the last word while a laugh is still going."""
+    level = _speech_level(rms, origin, words)
+    if not level:
+        return end
+    # A laugh often starts a beat after the line, so a short dip is bridged.
+    last, t = end, end
+    while t - end < RING_OUT_MAX and t - last <= RING_DIP:
+        i = int((t - origin) / FRAME)
+        if i >= len(rms):
+            break
+        if rms[i] >= LAUGH_RATIO * level:
+            last = t + FRAME
+        t += FRAME
+    return round(last + (0.3 if last > end else 0.0), 3)
+
+
+def plan_segments(words: list, max_pause: float = DEFAULT_MAX_PAUSE,
+                  rms: list = None, origin: float = 0.0) -> list:
     """Speech spans to keep, as [(start, end)] in SOURCE time.
 
     Consecutive words separated by more than max_pause start a new segment; the
@@ -59,13 +99,15 @@ def plan_segments(words: list, max_pause: float = DEFAULT_MAX_PAUSE) -> list:
     if not words:
         return []
 
+    level = _speech_level(rms, origin, words) if rms else 0.0
     segments = []
     seg_start = words[0]["start"] - HEAD_PAD
     prev_end = words[0]["end"]
 
     for word in words[1:]:
         gap = word["start"] - prev_end
-        if gap > max_pause:
+        if gap > max_pause and not (level and _loud(rms, origin, prev_end,
+                                                     word["start"], level)):
             segments.append((max(0.0, seg_start), prev_end + TAIL_PAD))
             seg_start = word["start"] - HEAD_PAD
         prev_end = word["end"]
@@ -145,7 +187,7 @@ def removed_seconds(segments: list, clip_start: float, clip_end: float) -> float
 
 
 def tighten(words: list, clip_start: float, clip_end: float,
-            max_pause: float = DEFAULT_MAX_PAUSE):
+            max_pause: float = DEFAULT_MAX_PAUSE, rms: list = None):
     """Returns (segments, remapped_words, seconds_removed).
 
     Segments are clamped to the clip's own range so a shared transcript cannot
@@ -156,8 +198,11 @@ def tighten(words: list, clip_start: float, clip_end: float,
 
     segments = [
         (max(start, clip_start), min(end, clip_end))
-        for start, end in plan_segments(words, max_pause)
+        for start, end in plan_segments(words, max_pause, rms, clip_start)
     ]
+    # Keep the ring-out after the last word: the clip end may sit past it.
+    if segments and rms and clip_end - segments[-1][1] <= RING_OUT_MAX + 0.3:
+        segments[-1] = (segments[-1][0], clip_end)
     segments = [(s, e) for s, e in segments if e - s >= MIN_SEGMENT]
     if not segments:
         return [], list(words), 0.0
